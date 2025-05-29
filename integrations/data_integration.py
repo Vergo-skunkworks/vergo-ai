@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # --- Load Environment Variables ---
 load_dotenv()
 
-# --- Constants moved from app.py ---
+# --- Constants moved from main.py ---
 ALLOWED_EXTENSIONS = {"xlsx", "xls"}
 
 
@@ -33,31 +33,52 @@ def allowed_file(filename: str) -> bool:
 @contextmanager
 def get_db_connection():
     """Provides a managed database connection."""
-    db_params = {
-        "dbname": os.environ.get("DB_NAME"),
-        "user": os.environ.get("DB_USER"),
-        "password": os.environ.get("DB_PASSWORD"),
-        "host": os.environ.get("DB_HOST"),
-        "port": os.environ.get("DB_PORT"),
-    }
-    if not all(db_params.values()):
+    # Required environment variables
+    db_name = os.environ.get("DB_NAME")
+    db_user = os.environ.get("DB_USER")
+    db_password = os.environ.get("DB_PASSWORD")
+    instance_connection_name = os.environ.get("INSTANCE_CONNECTION_NAME")
+
+    # Validate required environment variables
+    if not all([db_name, db_user, db_password, instance_connection_name]):
+        missing_vars = []
+        if not db_name:
+            missing_vars.append("DB_NAME")
+        if not db_user:
+            missing_vars.append("DB_USER")
+        if not db_password:
+            missing_vars.append("DB_PASSWORD")
+        if not instance_connection_name:
+            missing_vars.append("INSTANCE_CONNECTION_NAME")
+
         raise ValueError(
-            "Database connection parameters (DB_NAME, DB_USER,"
-            " DB_PASSWORD, DB_HOST, DB_PORT) must be set in environment variables."
+            f"Missing required environment variables: {', '.join(missing_vars)}"
         )
 
     from urllib.parse import quote_plus
 
+    # For Cloud SQL Connector using Unix domain sockets
+    # Format: postgresql+psycopg2://user:password@/dbname?host=/cloudsql/instance_connection_name
     conn_string = (
-        f"postgresql+psycopg2://{db_params['user']}:{quote_plus(db_params['password'])}@{db_params['host']}:"
-        f"{db_params['port']}/{db_params['dbname']}"
+        f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+        f"?host=/cloudsql/{instance_connection_name}"
     )
+
+    # Alternative format (both should work):
+    # conn_string = f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/cloudsql/{
+    # instance_connection_name}/{db_name}"
 
     engine = None
     conn = None
     try:
-        logger.debug("Attempting to connect to the database.")
-        engine = create_engine(conn_string)
+        logger.debug("Attempting to connect to the database via Cloud SQL Connector.")
+        engine = create_engine(
+            conn_string,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_recycle=1800,  # 30 minutes
+        )
         conn = engine.connect()
         logger.debug("Database connection successful.")
         yield conn, engine
@@ -193,7 +214,7 @@ def setup_jsonb_table():
 
 
 def get_or_create_company_data(
-        company_id: int,
+    company_id: int,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Gets existing company data and schema or creates a new empty structure
@@ -246,7 +267,7 @@ def get_or_create_company_data(
 
 
 def update_company_jsonb(
-        company_id: int, data: Dict[str, Any], data_schema: Dict[str, Any]
+    company_id: int, data: Dict[str, Any], data_schema: Dict[str, Any]
 ):
     """Updates the JSONB data and schema for a company."""
     with get_db_connection() as (conn, engine):
@@ -296,14 +317,14 @@ def infer_excel_col_schema(df: pd.DataFrame) -> Dict[str, str]:
                 # Attempt to check if non-NA values are all datetime-like
                 # This is a heuristic and might not cover all edge cases or mixed-type columns well.
                 if (
-                        df[col]
-                                .dropna()
-                                .map(
-                            lambda x: isinstance(
-                                x, (datetime.datetime, datetime.date, pd.Timestamp)
-                            )
+                    df[col]
+                    .dropna()
+                    .map(
+                        lambda x: isinstance(
+                            x, (datetime.datetime, datetime.date, pd.Timestamp)
                         )
-                                .all()
+                    )
+                    .all()
                 ):
                     schema[sanitized_col_name] = "DATETIME"
                 else:
@@ -316,9 +337,9 @@ def infer_excel_col_schema(df: pd.DataFrame) -> Dict[str, str]:
 
 
 def process_excel_report_to_jsonb(
-        report_key: str,  # Expects already sanitized report name
-        file_source: Union[str, io.BytesIO],
-        company_id: int,
+    report_key: str,  # Expects already sanitized report name
+    file_source: Union[str, io.BytesIO],
+    company_id: int,
 ) -> Dict[str, Any]:
     """
     Processes an Excel file (first sheet only), stores its data under report_key
@@ -358,7 +379,7 @@ def process_excel_report_to_jsonb(
                         key
                     )  # Sanitize individual column keys from Excel
                     if isinstance(
-                            value, (pd.Timestamp, datetime.datetime, datetime.date)
+                        value, (pd.Timestamp, datetime.datetime, datetime.date)
                     ):
                         serializable_record[s_key] = value.isoformat()
                     elif pd.isna(value):
@@ -383,7 +404,7 @@ def process_excel_report_to_jsonb(
             "schema_updated": data_schema.get(report_key, {}),
         }
     except (
-            ValueError
+        ValueError
     ) as e:  # Catches issues like bad Excel file format if pandas raises ValueError
         logger.error(
             f"❌ Invalid Excel file format or content for report '{report_key}': {e}",
@@ -424,9 +445,9 @@ def process_excel_report_to_jsonb(
 
 
 def handle_excel_upload_request(
-        excel_file_storage: FileStorage,
-        company_id_str: Union[str, None],
-        report_name_original: Union[str, None],
+    excel_file_storage: FileStorage,
+    company_id_str: Union[str, None],
+    report_name_original: Union[str, None],
 ) -> Tuple[Dict[str, Any], int]:
     """
     Handles the overall Excel upload request, including validation,
@@ -434,7 +455,7 @@ def handle_excel_upload_request(
     Returns a response dictionary and an HTTP status code.
     """
     if (
-            not excel_file_storage
+        not excel_file_storage
     ):  # Should be caught by Flask route if 'excel_file' not in request.files
         return {
             "status": "error",
@@ -495,15 +516,15 @@ def handle_excel_upload_request(
                 "message", "Unknown error during processing."
             )
             if (
-                    "Invalid Excel file format" in error_message
-                    or "File not found" in error_message
+                "Invalid Excel file format" in error_message
+                or "File not found" in error_message
             ):  # file not found
                 # from processor
                 return result_data, 400  # Bad request
             return result_data, 500  # Internal server error for other processing issues
 
     except (
-            Exception
+        Exception
     ) as e:  # Catch any other unexpected errors during this handling phase
         logger.error(
             f"Handler: General error for report '{report_key}' (company {company_id}): {e}",

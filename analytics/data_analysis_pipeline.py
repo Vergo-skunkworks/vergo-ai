@@ -26,30 +26,51 @@ logger = logging.getLogger(__name__)
 @contextmanager
 def get_db_connection():
     """Provides a managed database connection."""
-    db_params = {
-        "dbname": os.environ.get("DB_NAME"),
-        "user": os.environ.get("DB_USER"),
-        "password": os.environ.get("DB_PASSWORD"),
-        "host": os.environ.get("DB_HOST"),
-        "port": os.environ.get("DB_PORT"),
-    }
-    if not all(db_params.values()):
+    # Required environment variables
+    db_name = os.environ.get("DB_NAME")
+    db_user = os.environ.get("DB_USER")
+    db_password = os.environ.get("DB_PASSWORD")
+    instance_connection_name = os.environ.get("INSTANCE_CONNECTION_NAME")
+
+    # Validate required environment variables
+    if not all([db_name, db_user, db_password, instance_connection_name]):
+        missing_vars = []
+        if not db_name:
+            missing_vars.append("DB_NAME")
+        if not db_user:
+            missing_vars.append("DB_USER")
+        if not db_password:
+            missing_vars.append("DB_PASSWORD")
+        if not instance_connection_name:
+            missing_vars.append("INSTANCE_CONNECTION_NAME")
+
         raise ValueError(
-            "Database connection parameters (DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT) must be set in "
-            "environment variables."
+            f"Missing required environment variables: {', '.join(missing_vars)}"
         )
 
+    from urllib.parse import quote_plus
+
+    # For Cloud SQL Connector using Unix domain sockets
+    # Format: postgresql+psycopg2://user:password@/dbname?host=/cloudsql/instance_connection_name
     conn_string = (
-        f"postgresql+psycopg2://{db_params['user']}:{db_params['password']}@{db_params['host']}:"
-        f"{db_params['port']}/{db_params['dbname']}"
+        f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+        f"?host=/cloudsql/{instance_connection_name}"
     )
+
+    # Alternative format (both should work):
+    # conn_string = f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/cloudsql/{
+    # instance_connection_name}/{db_name}"
+
     engine = None
     conn = None
     try:
-        logger.debug("Attempting to connect to the database.")
-        # Increase statement_timeout for potentially longer queries
+        logger.debug("Attempting to connect to the database via Cloud SQL Connector.")
         engine = create_engine(
-            conn_string, connect_args={"options": "-c statement_timeout=60000"}
+            conn_string,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_recycle=1800,  # 30 minutes
         )
         conn = engine.connect()
         logger.debug("Database connection successful.")

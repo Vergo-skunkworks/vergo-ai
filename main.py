@@ -1,10 +1,11 @@
 import logging
+import os
 from flask import Flask, request, jsonify, current_app
-from data_analysis.data_analysis_pipeline import process_prompt
+from analytics.data_analysis_pipeline import process_prompt
 from dotenv import load_dotenv
 
 try:
-    from reports_integration.data_integration import (
+    from integrations.data_integration import (
         setup_jsonb_table,
         handle_excel_upload_request,
         logger,
@@ -13,7 +14,7 @@ except ImportError:
     import sys
 
     # sys.path.append(os.path.join(os.path.dirname(__file__), 'path_to_your_module'))
-    from reports_integration.data_integration import (
+    from integrations.data_integration import (
         setup_jsonb_table,
         handle_excel_upload_request,  # Changed
         logger,
@@ -136,4 +137,7 @@ def health_check():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5001)
+    # Get the port number from the environment variable PORT, default to 8080
+    port = int(os.environ.get("PORT", 8080))
+    # Run the app. Set debug to False for production.
+    app.run(debug=False, host="0.0.0.0", port=port)
