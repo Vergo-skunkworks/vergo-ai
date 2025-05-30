@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 import pandas as pd
 from sqlalchemy import create_engine, text
 import json
@@ -8,7 +9,7 @@ import logging
 import google.generativeai as genai
 from dotenv import load_dotenv
 import ast
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Required
 import io
 import base64
 import openpyxl
@@ -52,14 +53,21 @@ def get_db_connection():
 
     # For Cloud SQL Connector using Unix domain sockets
     # Format: postgresql+psycopg2://user:password@/dbname?host=/cloudsql/instance_connection_name
+    # conn_string = (
+    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+    #     f"?host=/cloudsql/{instance_connection_name}"
+    # )
+
+    # conn_string = (
+    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+    #     f"?host=35.190.189.103"
+    # )
+
+    # Alternative format (both should work):
     conn_string = (
         f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
         f"?host=/cloudsql/{instance_connection_name}"
     )
-
-    # Alternative format (both should work):
-    # conn_string = f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/cloudsql/{
-    # instance_connection_name}/{db_name}"
 
     engine = None
     conn = None
@@ -127,7 +135,7 @@ def sql_query_with_params(query: str, params: dict = None) -> List[Dict[str, Any
         raise
 
 
-def get_company_data_schema(company_id: int) -> str:
+def get_company_data_schema(company_id: int, to_date: datetime.date) -> str:
     """
     Retrieves the 'data_schema' JSONB content for a specific company
     from the 'company_data' table.
@@ -142,14 +150,14 @@ def get_company_data_schema(company_id: int) -> str:
     logger.debug(f"Retrieving data_schema for company_id: {company_id}")
     # Ensure company_id is treated as an integer in the query parameter
     query = text(
-        "SELECT data_schema FROM company_data WHERE company_id = :company_id LIMIT 1"
+        "SELECT data_schema FROM company_data WHERE company_id = :company_id AND to_date=:to_date LIMIT 1"
     )
     schema_json = "{}"  # Default to empty JSON string
 
     try:
         with get_db_connection() as (conn, engine):
             # Execute query with parameter binding
-            result = conn.execute(query, {"company_id": company_id}).fetchone()
+            result = conn.execute(query, {"company_id": company_id,"to_date": to_date}).fetchone()
 
             if result and result[0]:
                 # The database driver (psycopg2) usually converts JSONB to Python dict/list automatically
@@ -310,7 +318,7 @@ def parse_tasks_response(response_text):
             )
 
 
-def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
+def process_prompt(prompt: str, company_id: int, to_date:datetime.date) -> List[Dict[str, Any]]:
     """
     Processes a user prompt against data in the 'company_data' table's JSONB columns
     for a specific company.
@@ -343,7 +351,7 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
         # ---- Step 2a: Get Schema ----
         logger.info("\n📜 STEP 2a: FETCHING SCHEMA FROM company_data TABLE")
         database_schema_json_or_error = get_company_data_schema(
-            company_id
+            company_id, to_date
         )  # Use the new function
 
         if database_schema_json_or_error.startswith("Error:"):
@@ -409,7 +417,7 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
                                     
                                     The data for these tasks resides in a single table 'company_data' within a JSONB 
                                     column named 'data'. You MUST filter 
-                                    by company_id = {company_id}.
+                                    by company_id = {company_id} and to_date={to_date}.
                                     The structure of this 'data' column for the relevant company is described by the 
                                     'Data Schema'. The keys in the 'Data 
                                     Schema' (e.g., "pms", "change_order") correspond to the top-level keys within the 
@@ -417,7 +425,7 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
                                     an array of JSON objects.
                                     
                                     Data Schema (Structure within the 'data' JSONB column of 'company_data' for 
-                                    company_id={company_id}):
+                                    company_id={company_id}) and to_date={to_date}:
                                     {database_schema_json}
                                     
                                     **Guidelines for Defining Tasks:**
@@ -584,7 +592,7 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
                         **=== DATA SOURCE ===**
                         - All data comes from a single table: `company_data`.
                         - This table has a JSONB column named `data` which holds all the information.
-                        - **CRITICAL:** You MUST filter rows using `WHERE company_id = :company_id`. The specific ID 
+                        - **CRITICAL:** You MUST filter rows using `WHERE company_id = :company_id AND to_date=:to_date`. The specific ID and Date 
                         will 
                         be provided in the task details.
                         - The structure of the JSONB `data` column is defined by the schema provided below.
@@ -606,17 +614,17 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
                             )
                             ```
                           * Example: `WITH pms_data AS (SELECT company_id, jsonb_array_elements(data -> 'pms') AS 
-                          pms_elem FROM company_data WHERE company_id = :company_id)`
+                          pms_elem FROM company_data WHERE company_id = :company_id) and to_date=:to_date`
                           * Multiple CTEs should be chained with commas: `WITH first_cte AS (...), second_cte AS (...)`
 
-                          * If it requires aggregate analysis. then create cte with selected group by aggregation
+                          * If it requires aggregate analysis. then create cte with selected group by aggregation like below example:
                           *  WITH estimator_analysis_pm AS (
                                 SELECT 
                                     (elem ->> 'pm_id')::FLOAT::INT AS pm_id,
                                     elem ->> 'pm_name' AS pm_name
                                 FROM company_data,
                                     jsonb_array_elements(data -> 'estimator_analysis_pm') AS elem
-                                WHERE company_id = :company_id
+                                WHERE company_id = :company_id and to_date=:to_date
                                 ),
 
                                 estimator_analysis_jobs_written AS (
@@ -627,13 +635,13 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
                                     SUM((elem ->> 'estimated_cost')::FLOAT) AS total_budget_written
                                 FROM company_data,
                                     jsonb_array_elements(data -> 'estimator_analysis_jobs_written') AS elem
-                                WHERE company_id = :company_id
+                                WHERE company_id = :company_id  and to_date=:to_date
                                     AND (elem ->> 'pm_id') IS NOT NULL
                                     AND (elem ->> 'original_contract') IS NOT NULL
                                     AND (elem ->> 'estimated_cost') IS NOT NULL
                                 GROUP BY pm_id
                                 ), and other more if required. then joined them based on specified key.
-
+                        Above is just example for you. Generate query according to give requirments.
                         - **Accessing Fields:** Use the `->>` operator on the unnested element alias to extract 
                         fields as text (e.g.,
                          `pms_elem ->> 'PM_Name'`).
@@ -671,21 +679,13 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
                            e.g., "123.0").** Example: `FROM pms_data JOIN co_data ON (pms_data.pms_elem ->> 
                            'PM_Id')::FLOAT::INTEGER = (co_data.co_elem ->> 'Project_Manager_Id')::FLOAT::INTEGER`.
 
-                        - **Final SELECT Clause:**
-                           - **CRITICAL:** Select fields by extracting them from the *unnested element aliases* from 
-                           the relevant CTE used in the FROM clause.
-                           - Assign clear aliases to the selected fields using `AS`. Example: `SELECT (
-                           pms_data.pms_elem ->> 'PM_Name') AS project_manager_name, SUM((co_data.co_elem ->> 'Change 
-                           Orders')::FLOAT) AS total_change_orders ...`
-                           - Also add pm_id for every pm name.
-
                         - **GROUP BY / ORDER BY Clause:**
                            - **CRITICAL:** Use the *aliases assigned in the final SELECT clause* for grouping and 
                            ordering. Example: `... GROUP BY project_manager_name ORDER BY project_manager_name;` (Do 
                            NOT use `pms_data.pms_elem ->> 'PM_Name'` here).
                            - Always order data using relevant column.
 
-                        - **Mandatory `company_id` Filter:** The `WHERE company_id = :company_id` clause MUST be 
+                        - **Mandatory `company_id and to_date` Filter:** The `WHERE company_id = :company_id and to_date=:to_date` clause MUST be 
                         present within each CTE that accesses the `company_data` table directly.
 
                         - **NULL Handling & Data Cleaning:**
@@ -707,7 +707,7 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
                         & casted fields. Apply `GROUP BY` using the *final SELECT aliases*.
 
 
-                        **=== QUERY STRUCTURE CHECKLIST (MANDATORY) ===**
+                        **=== QUERY STRUCTURE CHECKLIST (MANDATORY) Must follow ===**
                         Your query MUST follow this structure:
                         1. Start with WITH clause containing one or more CTEs for unnesting arrays
                         2. Each CTE must filter on company_id = :company_id
@@ -715,12 +715,12 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
                         4. JOIN CTEs when accessing multiple arrays
                         5. Apply proper IS NOT NULL conditions
                         6. Use field aliases consistently
-                        7. Fetch data for every column required. do not assume yourself null or 0.
+                        7. **Mandatory**. Fetch data and to calculation for every required column. do not assume yourself null or 0. Do not use like (select 0 as "column" or select null as "column"). Strictly ensure all relevant data is feched and all CTEs are generated. 
                         8. Avoid unnecessary left joins as it will duplicate rows. use it if you think its best fit.
                         Storing report in cte is critical You can Union at end. strictly adhere it.
-                        10. There is business logic which should follow, for calculating gross profit percentage if 
-                        calculated value is negative than replace it with zero. change query to according to it. 
-                        Formula to calculate % gorss profit is dividing gross profit/ Billed * 100 JTD.    
+                        10. Formula to calculate Total profit is  Billed JTD - Cost JTD. Do not calculate total profit from jobs completed column. Instead do the calculation. There is business logic which should follow, for calculating gross profit percentage if 
+                        calculated value is negative than replace it with zero. change query to according to it Ans also make sure it should not null if null replace with zero. 
+                        Formula to calculate % gorss profit is dividing gross profit/ Billed JTD * 100 .    
                         11. Do not use column name alias like avg_job_size. Use Avg Job Size.Another example like 
                         total_jobs_written should be Total Jobs Written. Strictly Follow this pattern. Also if column 
                         calculating Sum, do not name it Sum Billed JTD or Sum cost JTD just use Billed JTD and Cost 
@@ -728,18 +728,17 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
                         for few.   
                         12. One more condition. If every column against pm has value zero then exclude that row. if 
                         cone column have value than we have to keep this row.
-                        13. Write correct sql query logicaly and syntactiacly.
+                        13. Write correct sql query logically and syntactically.
                         14. Use column name from ctes not from report itself in select statement of report CTE. Do 
                         not like below as it will give error and its syntax is incorrect.
                         15. Strictly Follow all above conditions.
                         16. Do not use order by in final as Total row will be move somewhere.
-                        17. DO not column refer with its alias in where clause. PostgreSQL does not allow referencing 
+                        17. Do not refer column with its alias in where clause. PostgreSQL does not allow referencing 
                         a column alias in the WHERE clause of the same SELECT where the alias is defined. Strictly 
                         Ensure this. Do not use like below:
 
                         select pm.pm_name as PM Name from pm where "PM Name" is not NULL.
                         above query is incorrect.
-
                         18. After fetching data add one more row which be total row of all numeric estimation columns 
                         and calculate total average of column if column is calculating average. its critical so not 
                         sum up values of column instead average columns. You can union the result with total row. You 
@@ -770,16 +769,28 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
                             SUM(Total Original Contract Written),
                             SUM(Total Original Contract Written) / NULLIF(SUM(No. of Jobs Written), 0) AS Avg Job Size
                             FROM report_data;
-
+                        Follow all above instructions. Every instructions is important.
+                        
+                        - **Final SELECT Clause:**
+                           - **CRITICAL:** Select fields by extracting them from the *unnested element aliases* from 
+                           the relevant CTE used in the FROM clause.
+                           - Assign clear aliases to the selected fields using `AS`. Example: `SELECT (
+                           pms_data.pms_elem ->> 'PM_Name') AS project_manager_name, SUM((co_data.co_elem ->> 'Change 
+                           Orders')::FLOAT) AS total_change_orders ...`
+                           - Also add pm_id for every pm name.
+                           
+                        Do not add pm_id column in final result.
                         **=== TASK ===**
                         Task Description: {{{{TASK_DESCRIPTION_PLACEHOLDER}}}}
                         Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
                         Company ID for Query: {{{{COMPANY_ID_PLACEHOLDER}}}} # This is the ID to use in the 
+                        Date for Query: {{{{Required_DATE}}}}
                         :company_id parameter
+                        :to_date parameter
 
                         **=== OUTPUT FORMAT ===**
                         - Raw PostgreSQL query ONLY.
-                        - **MUST** include the placeholder `:company_id` for filtering the `company_data` table 
+                        - **MUST** include the placeholder `:company_id and :to_date` for filtering the `company_data` table 
                         within the CTEs.
                         - No explanations, comments, markdown (like ```sql).
                         - ALL queries MUST begin with a WITH clause that defines CTEs for unnesting arrays.
@@ -844,9 +855,10 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
                 sql_prompt = (
                     f"Task Description: {task_description}\n"
                     f"Required Data Summary: {required_data}\n"
-                    f"Company ID for Query: {company_id}\n"  # Inject the actual company_id
+                    f"Company ID for Query: {company_id}\n" # Inject the actual company_id
+                    f"to_date for Query: {to_date}\n" # Inject the actual Date
                     f"Generate the PostgreSQL query using ONLY the provided schema and adhering strictly to the JSONB "
-                    f"querying rules, including the :company_id parameter and correct field access in SELECT/GROUP "
+                    f"querying rules, including the :company_id and :to_date parameter and correct field access in SELECT/GROUP "
                     f"BY/ORDER BY."
                 )  # Added reminder
 
@@ -895,7 +907,7 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
                 logger.info(f"    Fetching data using JSONB query...")
                 # --- Use the new function with parameter binding ---
                 data = sql_query_with_params(
-                    sql_query_text, params={"company_id": company_id}
+                    sql_query_text, params={"company_id": company_id,"to_date": to_date}
                 )
 
                 if not data:

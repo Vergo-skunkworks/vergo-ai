@@ -1,5 +1,6 @@
 import logging
 import os
+import datetime
 from flask import Flask, request, jsonify, current_app
 from analytics.data_analysis_pipeline import process_prompt
 from dotenv import load_dotenv
@@ -69,6 +70,7 @@ def upload_excel_report_route():
     excel_file = request.files["excel_file"]  # This is a FileStorage object
     company_id_str = request.form.get("company_id")
     report_name_original = request.form.get("report_name")
+    to_date_str = request.form.get("to_date")
 
     # Further validation and processing is now delegated to handle_excel_upload_request
 
@@ -78,6 +80,7 @@ def upload_excel_report_route():
             excel_file_storage=excel_file,
             company_id_str=company_id_str,
             report_name_original=report_name_original,
+            to_date_str=to_date_str
         )
         return jsonify(response_data), status_code
 
@@ -111,14 +114,19 @@ def query_pipeline():
     data = request.get_json()
     prompt = data.get("prompt")
     company_id = data.get("company_id")
+    to_date = data.get("to_date")
 
     if not prompt:
         logger.warning("Missing prompt in request")
         return jsonify({"error": "Missing 'prompt' in request body"}), 400
 
+    if not to_date:
+        logger.warning("Missing Report Date in request")
+        return jsonify({"error": "Missing 'Date' in request body"}), 400
     try:
+        to_date = datetime.datetime.strptime(to_date, "%Y-%m-%d").date()
         logger.info(f"Processing prompt: {prompt[:100]}...")
-        result = process_prompt(prompt, company_id)
+        result = process_prompt(prompt, company_id, to_date)
         logger.info("Successfully processed prompt via /api/query")
         return jsonify({"response": result}), 200
     except ValueError as ve:
