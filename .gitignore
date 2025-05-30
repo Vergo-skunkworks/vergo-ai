@@ -6,3 +6,7 @@
 rag_pipeline1.py
 rag_temp.py
 temp.sql
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
