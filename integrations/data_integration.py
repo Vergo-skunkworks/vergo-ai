@@ -65,6 +65,10 @@ def get_db_connection():
     # )
 
     # Alternative format (both should work):
+    # conn_string = (
+    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+    #     f"?host=/cloudsql/{instance_connection_name}"
+    # )
     conn_string = (
         f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
         f"?host=/cloudsql/{instance_connection_name}"
@@ -219,7 +223,7 @@ def setup_jsonb_table():
 
 
 def get_or_create_company_data(
-    company_id: int, to_date: datetime.date
+        company_id: int, to_date: datetime.date
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Gets existing company data and schema or creates a new empty structure
@@ -229,7 +233,8 @@ def get_or_create_company_data(
         try:
             result = conn.execute(
                 text(
-                    "SELECT data, data_schema FROM public.company_data WHERE company_id = :company_id AND to_date = :to_date"
+                    "SELECT data, data_schema FROM public.company_data WHERE company_id = :company_id AND to_date = "
+                    ":to_date"
                 ),
                 {"company_id": company_id, "to_date": to_date},
             ).fetchone()
@@ -254,7 +259,7 @@ def get_or_create_company_data(
                         "company_id": company_id,
                         "data": json.dumps(empty_data),
                         "data_schema": json.dumps(empty_schema),
-                        "to_date": to_date
+                        "to_date": to_date,
                     },
                 )
                 conn.commit()
@@ -271,7 +276,10 @@ def get_or_create_company_data(
                 conn.rollback()
             raise
 
-def get_previous_company_data(company_id: int, to_date: datetime.date) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+
+def get_previous_company_data(
+        company_id: int, to_date: datetime.date
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Fetches data and schema from the most recent row before to_date for company_id."""
     with get_db_connection() as (conn, engine):
         try:
@@ -284,32 +292,43 @@ def get_previous_company_data(company_id: int, to_date: datetime.date) -> Tuple[
                 {"company_id": company_id, "to_date": to_date},
             ).fetchone()
             if result:
-                return dict(result[0]) if result[0] else {}, dict(result[1]) if result[1] else {}
+                return dict(result[0]) if result[0] else {}, (
+                    dict(result[1]) if result[1] else {}
+                )
             return {}, {}
         except SQLAlchemyError as e:
             logger.error(f"❌ Error fetching previous data: {e}", exc_info=True)
             return {}, {}
 
+
 def process_excel_report_to_jsonb(
-    report_key: str,
-    file_source: Union[str, io.BytesIO],
-    company_id: int,
-    to_date: datetime.date
+        report_key: str,
+        file_source: Union[str, io.BytesIO],
+        company_id: int,
+        to_date: datetime.date,
 ) -> Dict[str, Any]:
     """
     Processes an Excel file (first sheet only), merges with existing and previous data for the given date,
     and updates or creates a row in JSONB for the company_id and to_date.
     """
-    logger.info(f"Processing report '{report_key}' for company_id {company_id}, to_date {to_date}.")
+    logger.info(
+        f"Processing report '{report_key}' for company_id {company_id}, to_date {to_date}."
+    )
 
     # Get existing data for current (company_id, to_date) or create new
     company_data, data_schema = get_or_create_company_data(company_id, to_date)
 
     # Merge with previous data (from prior to_date) to ensure all reports are included
     previous_data, previous_schema = get_previous_company_data(company_id, to_date)
-    company_data.update({k: v for k, v in previous_data.items() if k not in company_data})
-    data_schema.update({k: v for k, v in previous_schema.items() if k not in data_schema})
-    logger.info(f"Merged {len(previous_data)} previous reports for company_id {company_id}, to_date {to_date}")
+    company_data.update(
+        {k: v for k, v in previous_data.items() if k not in company_data}
+    )
+    data_schema.update(
+        {k: v for k, v in previous_schema.items() if k not in data_schema}
+    )
+    logger.info(
+        f"Merged {len(previous_data)} previous reports for company_id {company_id}, to_date {to_date}"
+    )
 
     try:
         df = pd.read_excel(file_source, sheet_name=0, engine="openpyxl")
@@ -338,7 +357,7 @@ def process_excel_report_to_jsonb(
                 for key, value in record.items():
                     s_key = sanitize_name(key)
                     if isinstance(
-                        value, (pd.Timestamp, datetime.datetime, datetime.date)
+                            value, (pd.Timestamp, datetime.datetime, datetime.date)
                     ):
                         serializable_record[s_key] = value.isoformat()
                     elif pd.isna(value):
@@ -348,7 +367,8 @@ def process_excel_report_to_jsonb(
                 serializable_records.append(serializable_record)
 
             logger.info(
-                f"Storing {len(serializable_records)} records for report '{report_key}' for company_id {company_id}, to_date {to_date}"
+                f"Storing {len(serializable_records)} records for report '{report_key}' for company_id {company_id}, "
+                f"to_date {to_date}"
             )
             company_data[report_key] = serializable_records
             num_records = len(serializable_records)
@@ -422,14 +442,14 @@ def infer_excel_col_schema(df: pd.DataFrame) -> Dict[str, str]:
                 # Attempt to check if non-NA values are all datetime-like
                 # This is a heuristic and might not cover all edge cases or mixed-type columns well.
                 if (
-                    df[col]
-                    .dropna()
-                    .map(
-                        lambda x: isinstance(
-                            x, (datetime.datetime, datetime.date, pd.Timestamp)
+                        df[col]
+                                .dropna()
+                                .map(
+                            lambda x: isinstance(
+                                x, (datetime.datetime, datetime.date, pd.Timestamp)
+                            )
                         )
-                    )
-                    .all()
+                                .all()
                 ):
                     schema[sanitized_col_name] = "DATETIME"
                 else:
@@ -442,7 +462,10 @@ def infer_excel_col_schema(df: pd.DataFrame) -> Dict[str, str]:
 
 
 def update_company_jsonb(
-    company_id: int, to_date: datetime.date, data: Dict[str, Any], data_schema: Dict[str, Any]
+        company_id: int,
+        to_date: datetime.date,
+        data: Dict[str, Any],
+        data_schema: Dict[str, Any],
 ):
     """Updates the JSONB data and schema for a company and date."""
     with get_db_connection() as (conn, engine):
@@ -460,7 +483,9 @@ def update_company_jsonb(
                 },
             )
             conn.commit()
-            logger.info(f"Updated JSONB data and schema for company_id {company_id}, to_date {to_date}")
+            logger.info(
+                f"Updated JSONB data and schema for company_id {company_id}, to_date {to_date}"
+            )
         except SQLAlchemyError as e:
             logger.error(
                 f"❌ Error updating company data for company_id {company_id}, to_date {to_date}: {e}",
@@ -472,16 +497,18 @@ def update_company_jsonb(
 
 
 def process_excel_report_to_jsonb(
-    report_key: str,
-    file_source: Union[str, io.BytesIO],
-    company_id: int,
-    to_date: datetime.date
+        report_key: str,
+        file_source: Union[str, io.BytesIO],
+        company_id: int,
+        to_date: datetime.date,
 ) -> Dict[str, Any]:
     """
     Processes an Excel file (first sheet only), merges with existing and previous data for the given date,
     and updates or creates a row in JSONB for the company_id and to_date.
     """
-    logger.info(f"Processing report '{report_key}' for company_id {company_id}, to_date {to_date}.")
+    logger.info(
+        f"Processing report '{report_key}' for company_id {company_id}, to_date {to_date}."
+    )
 
     # Get existing data for current (company_id, to_date) or create new
     company_data, data_schema = get_or_create_company_data(company_id, to_date)
@@ -490,7 +517,9 @@ def process_excel_report_to_jsonb(
     previous_data, previous_schema = get_previous_company_data(company_id, to_date)
     company_data.update(previous_data)
     data_schema.update(previous_schema)
-    logger.info(f"Copied {len(previous_data)} previous reports for company_id {company_id}, to_date {to_date}")
+    logger.info(
+        f"Copied {len(previous_data)} previous reports for company_id {company_id}, to_date {to_date}"
+    )
 
     try:
         df = pd.read_excel(file_source, sheet_name=0, engine="openpyxl")
@@ -519,7 +548,7 @@ def process_excel_report_to_jsonb(
                 for key, value in record.items():
                     s_key = sanitize_name(key)
                     if isinstance(
-                        value, (pd.Timestamp, datetime.datetime, datetime.date)
+                            value, (pd.Timestamp, datetime.datetime, datetime.date)
                     ):
                         serializable_record[s_key] = value.isoformat()
                     elif pd.isna(value):
@@ -529,7 +558,8 @@ def process_excel_report_to_jsonb(
                 serializable_records.append(serializable_record)
 
             logger.info(
-                f"Storing {len(serializable_records)} records for report '{report_key}' for company_id {company_id}, to_date {to_date}"
+                f"Storing {len(serializable_records)} records for report '{report_key}' for company_id {company_id}, "
+                f"to_date {to_date}"
             )
             company_data[report_key] = serializable_records
             num_records = len(serializable_records)
@@ -582,10 +612,10 @@ def process_excel_report_to_jsonb(
 
 
 def handle_excel_upload_request(
-    excel_file_storage: FileStorage,
-    company_id_str: Union[str, None],
-    report_name_original: Union[str, None],
-    to_date_str: Union[str, None]
+        excel_file_storage: FileStorage,
+        company_id_str: Union[str, None],
+        report_name_original: Union[str, None],
+        to_date_str: Union[str, None],
 ) -> Tuple[Dict[str, Any], int]:
     """
     Handles the overall Excel upload request, including validation,
@@ -593,7 +623,7 @@ def handle_excel_upload_request(
     Returns a response dictionary and an HTTP status code.
     """
     if (
-        not excel_file_storage
+            not excel_file_storage
     ):  # Should be caught by Flask route if 'excel_file' not in request.files
         return {
             "status": "error",
@@ -621,7 +651,10 @@ def handle_excel_upload_request(
     try:
         to_date = datetime.datetime.strptime(to_date_str, "%Y-%m-%d").date()
     except ValueError:
-        return {"status": "error", "message": "'to_date' must be in YYYY-MM-DD format"}, 400
+        return {
+            "status": "error",
+            "message": "'to_date' must be in YYYY-MM-DD format",
+        }, 400
 
     report_key = sanitize_name(report_name_original)
     if report_key == "invalid_name" or not report_key:
@@ -644,7 +677,7 @@ def handle_excel_upload_request(
             report_key=report_key,
             file_source=file_content_stream,
             company_id=company_id,
-            to_date=to_date
+            to_date=to_date,
         )
 
         if result_data.get("status") == "success":
@@ -661,15 +694,15 @@ def handle_excel_upload_request(
                 "message", "Unknown error during processing."
             )
             if (
-                "Invalid Excel file format" in error_message
-                or "File not found" in error_message
+                    "Invalid Excel file format" in error_message
+                    or "File not found" in error_message
             ):  # file not found
                 # from processor
                 return result_data, 400  # Bad request
             return result_data, 500  # Internal server error for other processing issues
 
     except (
-        Exception
+            Exception
     ) as e:  # Catch any other unexpected errors during this handling phase
         logger.error(
             f"Handler: General error for report '{report_key}' (company {company_id}): {e}",
@@ -684,17 +717,24 @@ def handle_excel_upload_request(
             file_content_stream.close()
 
 
-def get_jsonb_data_summary(company_id: Union[int, None] = None, to_date: Union[datetime.date, None] = None) -> Dict[str, Any]:
+def get_jsonb_data_summary(
+        company_id: Union[int, None] = None, to_date: Union[datetime.date, None] = None
+) -> Dict[str, Any]:
     """Returns a summary of the JSONB data and schema in the database."""
     with get_db_connection() as (conn, engine):
         try:
             if company_id and to_date:
                 query = text(
-                    "SELECT company_id, to_date, data, data_schema FROM public.company_data WHERE company_id = :company_id AND to_date = :to_date"
+                    "SELECT company_id, to_date, data, data_schema FROM public.company_data WHERE company_id = "
+                    ":company_id AND to_date = :to_date"
                 )
-                result = conn.execute(query, {"company_id": company_id, "to_date": to_date}).fetchone()
+                result = conn.execute(
+                    query, {"company_id": company_id, "to_date": to_date}
+                ).fetchone()
                 if not result:
-                    return {"message": f"No data found for company_id {company_id}, to_date {to_date}"}
+                    return {
+                        "message": f"No data found for company_id {company_id}, to_date {to_date}"
+                    }
 
                 db_company_id, db_to_date, company_data, data_schema = result
                 summary = {

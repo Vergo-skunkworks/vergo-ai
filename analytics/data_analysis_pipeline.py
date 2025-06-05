@@ -30,6 +30,8 @@ def get_db_connection():
     # Required environment variables
     db_name = os.environ.get("DB_NAME")
     db_user = os.environ.get("DB_USER")
+    db_host = os.environ.get("DB_HOST")
+    db_port = os.environ.get("DB_PORT")
     db_password = os.environ.get("DB_PASSWORD")
     instance_connection_name = os.environ.get("INSTANCE_CONNECTION_NAME")
 
@@ -53,21 +55,18 @@ def get_db_connection():
 
     # For Cloud SQL Connector using Unix domain sockets
     # Format: postgresql+psycopg2://user:password@/dbname?host=/cloudsql/instance_connection_name
-    # conn_string = (
-    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-    #     f"?host=/cloudsql/{instance_connection_name}"
-    # )
-
-    # conn_string = (
-    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-    #     f"?host=35.190.189.103"
-    # )
-
-    # Alternative format (both should work):
     conn_string = (
         f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
         f"?host=/cloudsql/{instance_connection_name}"
     )
+
+    # conn_string = f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@{db_host}:{db_port}/{db_name}"
+
+    # Alternative format (both should work):
+    # conn_string = (
+    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+    #     f"?host=/cloudsql/{instance_connection_name}"
+    # )
 
     engine = None
     conn = None
@@ -157,7 +156,9 @@ def get_company_data_schema(company_id: int, to_date: datetime.date) -> str:
     try:
         with get_db_connection() as (conn, engine):
             # Execute query with parameter binding
-            result = conn.execute(query, {"company_id": company_id,"to_date": to_date}).fetchone()
+            result = conn.execute(
+                query, {"company_id": company_id, "to_date": to_date}
+            ).fetchone()
 
             if result and result[0]:
                 # The database driver (psycopg2) usually converts JSONB to Python dict/list automatically
@@ -221,7 +222,7 @@ def initialize_gemini_model(model_name="gemini-1.5-flash", system_instruction=No
     genai.configure(api_key=api_key)
 
     generation_config = {
-        "temperature": 0.1,
+        "temperature": 0.0,
         "top_p": 0.95,
         "top_k": 64,
         "max_output_tokens": 8192,
@@ -318,7 +319,9 @@ def parse_tasks_response(response_text):
             )
 
 
-def process_prompt(prompt: str, company_id: int, to_date:datetime.date) -> List[Dict[str, Any]]:
+def process_prompt(
+        prompt: str, company_id: int, to_date: datetime.date
+) -> List[Dict[str, Any]]:
     """
     Processes a user prompt against data in the 'company_data' table's JSONB columns
     for a specific company.
@@ -585,216 +588,174 @@ def process_prompt(prompt: str, company_id: int, to_date:datetime.date) -> List[
         insight_gemini = None
         title_gemini = None
 
-        sql_instruction = f""" You are an expert PostgreSQL query writer specializing in querying JSONB data.
-                        Generate a SINGLE, syntactically correct PostgreSQL SELECT query to retrieve data based on 
-                        the task.
+        sql_instruction = f"""
+        You are an expert PostgreSQL query writer specializing in querying JSONB data.
+        Generate a SINGLE, syntactically correct PostgreSQL SELECT query to retrieve data based on the task.
 
-                        **=== DATA SOURCE ===**
-                        - All data comes from a single table: `company_data`.
-                        - This table has a JSONB column named `data` which holds all the information.
-                        - **CRITICAL:** You MUST filter rows using `WHERE company_id = :company_id AND to_date=:to_date`. The specific ID and Date 
-                        will 
-                        be provided in the task details.
-                        - The structure of the JSONB `data` column is defined by the schema provided below.
+        **=== DATA SOURCE ===**
+        - All data comes from a single table: `company_data`.
+        - This table has a JSONB column named `data` which holds all the information.
+        - **CRITICAL:** You MUST filter rows using `WHERE company_id = :company_id AND to_date = :to_date`. The 
+        specific ID and Date will be provided in the task details.
+        - The structure of the JSONB `data` column is defined by the schema provided below.
 
-                        **=== JSONB SCHEMA (Structure within the 'data' column for the relevant company) ===**
-                        {database_schema_json}
-                        * The top-level keys (e.g., "pms", "change_order") contain arrays of JSON objects.
+        **=== JSONB SCHEMA (Structure within the 'data' column for the relevant company) ===**
+        {database_schema_json}
+        * The top-level keys (e.g., "pms", "change_order", "project_overview", "line_item_details") contain arrays of 
+        JSON objects.
 
-                        **=== QUERYING JSONB DATA ===**
-                        - **MANDATORY: ALWAYS Unnest Arrays Using CTEs:** 
-                          * You MUST use Common Table Expressions (CTEs) to unnest JSONB arrays.
-                          * Direct unnesting in the main query or subqueries is NOT allowed.
-                          * For every JSONB array you need to access, create a dedicated CTE using this pattern:
-                            ```
-                            WITH array_data AS (
-                              SELECT company_id, jsonb_array_elements(data -> 'array_name') AS elem_alias
-                              FROM company_data 
-                              WHERE company_id = :company_id
-                            )
-                            ```
-                          * Example: `WITH pms_data AS (SELECT company_id, jsonb_array_elements(data -> 'pms') AS 
-                          pms_elem FROM company_data WHERE company_id = :company_id) and to_date=:to_date`
-                          * Multiple CTEs should be chained with commas: `WITH first_cte AS (...), second_cte AS (...)`
+        **=== QUERYING JSONB DATA ===**
+        - **MANDATORY: ALWAYS Unnest Arrays Using CTEs:**
+          * You MUST use Common Table Expressions (CTEs) to unnest JSONB arrays. Direct unnesting in main 
+          query/subqueries is NOT allowed.
+          * Pattern: `WITH array_data AS (SELECT company_id, to_date, jsonb_array_elements(data -> 'array_name') AS 
+          elem_alias FROM company_data WHERE company_id = :company_id AND to_date = :to_date)`
+          * Multiple CTEs chained with commas: `WITH first_cte AS (...), second_cte AS (...)`
+          * If aggregation is needed within a CTE (e.g., summing monthly spend per project), do it there:
+            `WITH monthly_spend_cte AS (SELECT (elem ->> 'project_id')::TEXT AS project_id, SUM((elem ->> 
+            'spend')::FLOAT) AS total_spend FROM company_data, jsonb_array_elements(data -> 'monthly_spends') elem 
+            WHERE company_id = :company_id AND to_date = :to_date GROUP BY (elem ->> 'project_id')::TEXT)`
 
-                          * If it requires aggregate analysis. then create cte with selected group by aggregation like below example:
-                          *  WITH estimator_analysis_pm AS (
-                                SELECT 
-                                    (elem ->> 'pm_id')::FLOAT::INT AS pm_id,
-                                    elem ->> 'pm_name' AS pm_name
-                                FROM company_data,
-                                    jsonb_array_elements(data -> 'estimator_analysis_pm') AS elem
-                                WHERE company_id = :company_id and to_date=:to_date
-                                ),
+        - **Accessing Fields:** Use `->>` on unnested element alias (e.g., `elem_alias ->> 'fieldName'`).
 
-                                estimator_analysis_jobs_written AS (
-                                SELECT 
-                                    (elem ->> 'pm_id')::FLOAT::INT AS pm_id,
-                                    COUNT(*) AS num_jobs_written,
-                                    SUM((elem ->> 'original_contract')::FLOAT) AS total_jobs_written,
-                                    SUM((elem ->> 'estimated_cost')::FLOAT) AS total_budget_written
-                                FROM company_data,
-                                    jsonb_array_elements(data -> 'estimator_analysis_jobs_written') AS elem
-                                WHERE company_id = :company_id  and to_date=:to_date
-                                    AND (elem ->> 'pm_id') IS NOT NULL
-                                    AND (elem ->> 'original_contract') IS NOT NULL
-                                    AND (elem ->> 'estimated_cost') IS NOT NULL
-                                GROUP BY pm_id
-                                ), and other more if required. then joined them based on specified key.
-                        Above is just example for you. Generate query according to give requirments.
-                        - **Accessing Fields:** Use the `->>` operator on the unnested element alias to extract 
-                        fields as text (e.g.,
-                         `pms_elem ->> 'PM_Name'`).
+        - **Casting:** Cast extracted text to appropriate types (INTEGER, FLOAT, DATE).
+          - **PREFERRED FOR NUMERIC IDs/COUNTS (Safer): `(elem ->> 'field_name')::FLOAT::INTEGER`** (Handles "123.0").
+          - Direct `::INTEGER` ONLY if field is ALWAYS clean integer string.
+          - For PM_ID always consider it integer if it exists. Project_ID is often TEXT.
 
-                        - **Casting:** Cast extracted text values to appropriate PostgreSQL types (INTEGER, FLOAT, 
-                        DATE, etc.) when needed. This is especially important for values used in JOIN conditions, 
-                        WHERE clauses, or arithmetic operations.
-                          - For text fields representing integers:
-                            - **PREFERRED & SAFEST METHOD (use for IDs, counts, or any integer that might have a 
-                            decimal in its string form like "123.0"): Cast to FLOAT first, then to INTEGER. This 
-                            correctly handles and truncates decimals: `(elem ->> 'field_name')::FLOAT::INTEGER`. 
-                            Example: `(elem ->> 'user_id')::FLOAT::INTEGER AS user_id_integer`.**
-                            - If, and ONLY IF, you are ABSOLUTELY CERTAIN that the string field is ALWAYS a clean 
-                            integer (e.g., "123") and NEVER contains a decimal (e.g., NOT "123.0"), you *can* use a 
-                            direct cast: `(elem ->> 'field_name')::INTEGER`. However, the FLOAT-first method is 
-                            generally safer and should be preferred for IDs or counts.
-                            - For PM_ID always consider it integer.
+        - **Division by Zero:** Use `NULLIF(denominator_numeric, 0)`: `(numerator::FLOAT / NULLIF(denominator::FLOAT, 
+        0))`.
 
-                        - **Division by Zero:** Use `NULLIF(denominator, 0)` for safe division after casting operands 
-                        to numeric types:
-                         `(elem ->> 'ValueA')::FLOAT / NULLIF((elem ->> 'ValueB')::FLOAT, 0)`.
+        - **Filtering:** Apply `WHERE` conditions *after* extracting and casting.
 
-                        - **Filtering:** Apply WHERE conditions *after* extracting and casting the field (e.g., 
-                        `WHERE (co_elem ->>
-                         'Cost Center')::FLOAT::INTEGER = 2034`).
+        - **MANDATORY: "Joining" Data from Different Keys (Arrays):**
+           1. Unnest BOTH arrays in SEPARATE CTEs.
+           2. Standard SQL JOIN (INNER or LEFT) between CTEs.
+           3. **CRITICAL JOIN CONDITION:** Join `ON` extracted and CASTED fields. Use `::FLOAT::INTEGER` for numeric 
+           ID joins.
+              Example: `FROM pms_cte JOIN jobs_cte ON (pms_cte.elem ->> 'PM_Id')::FLOAT::INTEGER = (jobs_cte.elem ->> 
+              'Project_Manager_Id')::FLOAT::INTEGER`.
 
-                        - **MANDATORY: "Joining" Data from Different Keys:**
-                           1. ALWAYS unnest BOTH arrays using `jsonb_array_elements` in SEPARATE CTEs (e.g., `pms_data`,
-                             `co_data`). Each CTE should select the unnested element (e.g., `pms_elem`, `co_elem`).
-                           2. Perform a standard SQL JOIN (INNER or LEFT) between the CTEs.
-                           3. **CRITICAL JOIN CONDITION:** Join `ON` the extracted and CASTED fields from the 
-                           *unnested element aliases*. **Crucially, when joining on fields that represent IDs or 
-                           other integer numbers, use the safer `::FLOAT::INTEGER` casting method (e.g., `(elem ->> 
-                           'id_field')::FLOAT::INTEGER`) to prevent errors if the string value contains a decimal (
-                           e.g., "123.0").** Example: `FROM pms_data JOIN co_data ON (pms_data.pms_elem ->> 
-                           'PM_Id')::FLOAT::INTEGER = (co_data.co_elem ->> 'Project_Manager_Id')::FLOAT::INTEGER`.
+        - **Aggregation, GROUP BY, ORDER BY:**
+           - Standard SQL aggregates (SUM, AVG, COUNT).
+           - **CRITICAL for GROUP BY / ORDER BY:** Use *aliases assigned in the final SELECT clause*. Example: `GROUP 
+           BY project_manager_name ORDER BY project_manager_name;` (NOT `pms_data.pms_elem ->> 'PM_Name'`).
+           - Always order data using relevant column if task implies.
 
-                        - **GROUP BY / ORDER BY Clause:**
-                           - **CRITICAL:** Use the *aliases assigned in the final SELECT clause* for grouping and 
-                           ordering. Example: `... GROUP BY project_manager_name ORDER BY project_manager_name;` (Do 
-                           NOT use `pms_data.pms_elem ->> 'PM_Name'` here).
-                           - Always order data using relevant column.
+        - **Finding "Top N" per Group (e.g., top category by spend per project):**
+          If the task requires finding the "top" item within each group (e.g., "top_cost_category for each project"), 
+          you MUST use a multi-step CTE approach:
+          1. **First CTE (e.g., `project_category_sums`):** Calculate the aggregate (e.g., `SUM(amount)`) for each 
+          item (e.g., `category`) within the primary group (e.g., `project_id`). So, `GROUP BY project_id, category`.
+             ```sql
+             -- Example for Top-N:
+             WITH project_category_sums AS (
+                 SELECT
+                     (elem ->> 'project_id')::TEXT AS project_id,
+                     (elem ->> 'category')::TEXT AS category_name, -- Use distinct alias
+                     SUM((elem ->> 'amount_usd')::FLOAT) AS total_category_amount
+                 FROM company_data, jsonb_array_elements(data -> 'line_item_details') AS elem
+                 WHERE company_id = :company_id AND to_date = :to_date
+                 GROUP BY (elem ->> 'project_id')::TEXT, (elem ->> 'category')::TEXT
+             )
+             ```
+          2. **Second CTE (e.g., `ranked_project_categories`):** Use a window function like `ROW_NUMBER()` over the 
+          results of the first CTE, partitioned by the primary group (e.g., `project_id`) and ordered by the 
+          aggregate value (e.g., `total_category_amount DESC`).
+             ```sql
+             -- Example for Top-N (continued):
+             , ranked_project_categories AS (
+                 SELECT
+                     project_id,
+                     category_name,
+                     total_category_amount,
+                     ROW_NUMBER() OVER (PARTITION BY project_id ORDER BY total_category_amount DESC, category_name 
+                     ASC) as rn -- Add tie-breaker
+                 FROM project_category_sums
+             )
+             ```
+          3. **Third CTE (e.g., `top_category_per_project`):** Select from the second CTE where the rank (`rn`) is 1. 
+          This CTE will provide the top item per group.
+             ```sql
+             -- Example for Top-N (final part of this sub-logic):
+             , top_category_per_project AS (
+                 SELECT
+                     project_id,
+                     category_name AS top_cost_category -- Final alias for the report
+                     -- Optionally select total_category_amount if needed elsewhere
+                 FROM ranked_project_categories
+                 WHERE rn = 1
+             )
+             ```
+          This `top_category_per_project` CTE can then be `LEFT JOIN`ed to your main project data CTE (e.g., 
+          one unnesting 'project_overview').
 
-                        - **Mandatory `company_id and to_date` Filter:** The `WHERE company_id = :company_id and to_date=:to_date` clause MUST be 
-                        present within each CTE that accesses the `company_data` table directly.
+        - **Mandatory `company_id` and `to_date` Filter:** The `WHERE company_id = :company_id AND to_date = 
+        :to_date` clause MUST be present within each CTE that accesses the `company_data` table directly.
 
-                        - **NULL Handling & Data Cleaning:**
-                           - **Strict `IS NOT NULL` Enforcement**: For EVERY field extracted and aliased in the final 
-                           `SELECT` list, add a `WHERE` clause condition ensuring that extracted value `IS NOT NULL`. 
-                           Example: `WHERE (pms_data.pms_elem ->> 'PM_Name') IS NOT NULL AND (co_data.co_elem ->> 
-                           'Change Orders') IS NOT NULL`. Apply these checks *after* joins.
-                           - Additionally, for any extracted field used in another `WHERE` clause condition (beyond 
-                           `IS NOT NULL`) or in an `ORDER BY` clause, these fields MUST also have an `IS NOT NULL` 
-                           condition applied in the `WHERE` clause.
-                           - Combine all `IS NOT NULL` conditions using `AND`.
-                           - **Empty String Check:** Also consider `AND (extracted_field) <> ''` for TEXT fields if 
-                           needed.
-                           - **Zero Exclusion (Conditional):** Consider `AND (extracted_numeric_field)::FLOAT <> 0` 
-                           if the task implies focus on non-zero data. `IS NOT NULL` is mandatory.
-                           -
+        - **NULL Handling & Data Cleaning:**
+           - **Strict `IS NOT NULL` on final SELECT items**: For EVERY field extracted and aliased in the final 
+           `SELECT` list that is NOT part of an aggregate or COALESCE, add a `WHERE` clause condition ensuring that 
+           the original extracted value (before COALESCE) `IS NOT NULL`. Example: `WHERE (pms_data.pms_elem ->> 
+           'PM_Name') IS NOT NULL`. Apply these checks *after* joins in the final reporting CTE or main query.
+           - If a field is used in a `WHERE` condition (other than `IS NOT NULL`) or `ORDER BY`, it also needs an `IS 
+           NOT NULL` check.
+           - Use `COALESCE(value, default_value_for_type)` for fields in the final SELECT list if they might be NULL 
+           after LEFT JOINs, especially for aggregated sums (e.g., `COALESCE(SUM(spend), 0)`). For text, 
+           `COALESCE(field, '')`.
 
-                        - **Aggregation:** Use standard SQL aggregate functions (SUM, AVG, COUNT, etc.) on extracted 
-                        & casted fields. Apply `GROUP BY` using the *final SELECT aliases*.
+        - **Column Alias Formatting (Instruction #11 from your prompt):**
+            - Use spaces in final column aliases (e.g., `AS "Avg Job Size"`, `AS "Total Jobs Written"`).
+            - For SUMs, use direct names like `AS "Billed JTD"`, `AS "Cost JTD"` not `AS "Sum Billed JTD"`.
 
+        - **Total Row (Instruction #18 from your prompt):**
+          If a 'Total' row is implied by the request for a summary report:
+          1. Create a CTE for the main report data (e.g., `report_data_cte`).
+          2. `SELECT * FROM report_data_cte`
+          3. `UNION ALL`
+          4. A second `SELECT` statement that calculates totals:
+             `SELECT 'Total' AS "Grouping Column Name", SUM("Numeric Column1") AS "Numeric Column1", 
+             ... FROM report_data_cte;`
+             For average columns in the total row, calculate the weighted average correctly: `SUM(total_value_column) 
+             / NULLIF(SUM(count_column), 0)` or if it's an average of averages, be mindful of its statistical 
+             validity - sum underlying components if possible.
+          5. Do not apply `ORDER BY` to the final `UNION ALL` result if it moves the 'Total' row, unless you add a 
+          sort key.
 
-                        **=== QUERY STRUCTURE CHECKLIST (MANDATORY) Must follow ===**
-                        Your query MUST follow this structure:
-                        1. Start with WITH clause containing one or more CTEs for unnesting arrays
-                        2. Each CTE must filter on company_id = :company_id
-                        3. Main query should SELECT from the CTEs
-                        4. JOIN CTEs when accessing multiple arrays
-                        5. Apply proper IS NOT NULL conditions
-                        6. Use field aliases consistently
-                        7. **Mandatory**. Fetch data and to calculation for every required column. do not assume yourself null or 0. Do not use like (select 0 as "column" or select null as "column"). Strictly ensure all relevant data is feched and all CTEs are generated. 
-                        8. Avoid unnecessary left joins as it will duplicate rows. use it if you think its best fit.
-                        Storing report in cte is critical You can Union at end. strictly adhere it.
-                        10. Formula to calculate Total profit is  Billed JTD - Cost JTD. Do not calculate total profit from jobs completed column. Instead do the calculation. There is business logic which should follow, for calculating gross profit percentage if 
-                        calculated value is negative than replace it with zero. change query to according to it Ans also make sure it should not null if null replace with zero. 
-                        Formula to calculate % gorss profit is dividing gross profit/ Billed JTD * 100 .    
-                        11. Do not use column name alias like avg_job_size. Use Avg Job Size.Another example like 
-                        total_jobs_written should be Total Jobs Written. Strictly Follow this pattern. Also if column 
-                        calculating Sum, do not name it Sum Billed JTD or Sum cost JTD just use Billed JTD and Cost 
-                        JTD. If one column have then if have to keep this row. check condition for every column not 
-                        for few.   
-                        12. One more condition. If every column against pm has value zero then exclude that row. if 
-                        cone column have value than we have to keep this row.
-                        13. Write correct sql query logically and syntactically.
-                        14. Use column name from ctes not from report itself in select statement of report CTE. Do 
-                        not like below as it will give error and its syntax is incorrect.
-                        15. Strictly Follow all above conditions.
-                        16. Do not use order by in final as Total row will be move somewhere.
-                        17. Do not refer column with its alias in where clause. PostgreSQL does not allow referencing 
-                        a column alias in the WHERE clause of the same SELECT where the alias is defined. Strictly 
-                        Ensure this. Do not use like below:
+        - **Final SELECT Clause:**
+           - Select fields by extracting them from the *unnested element aliases* from relevant CTEs.
+           - Assign clear aliases using `AS "Column Name With Spaces"`.
+           - **Do not add `pm_id` column in the final result if "PM Name" is present, unless explicitly asked.**
 
-                        select pm.pm_name as PM Name from pm where "PM Name" is not NULL.
-                        above query is incorrect.
-                        18. After fetching data add one more row which be total row of all numeric estimation columns 
-                        and calculate total average of column if column is calculating average. its critical so not 
-                        sum up values of column instead average columns. You can union the result with total row. You 
-                        should previous generated column values to sum not from ctes. first store report data in cte 
-                        then used that cte to join with total row like below example.
+        **=== QUERY STRUCTURE CHECKLIST (MANDATORY) ===**
+        1. Start with `WITH` clause (CTEs for unnesting/aggregation/ranking).
+        2. Each CTE accessing `company_data` MUST filter on `company_id = :company_id AND to_date = :to_date`.
+        3. Main query (or final reporting CTE) SELECTs from these CTEs.
+        4. JOIN CTEs correctly (usually LEFT JOIN from a primary entity CTE like 'project_overview' to others).
+        5. Apply `IS NOT NULL` on critical fields as described under NULL Handling. Use `COALESCE` for final 
+        presentation of numeric/text fields that might be NULL.
+        6. Fetch data and perform calculations for every required column; do not default to 0 or NULL in SELECT 
+        unless using `COALESCE`.
+        7. Follow business logic for calculations (e.g., profit, percentages) if provided in the task.
+        8. If every numeric metric column against a primary entity (e.g., project) is zero after `COALESCE`, 
+        that row should still be included unless the task explicitly says to exclude all-zero rows. (Your instruction 
+        #12 said "if every column against pm has value zero then exclude that row." - This should be applied if it's 
+        part of the TASK).
+        9. Ensure column name aliases are formatted with spaces as per instruction #11.
+        10. Include a 'Total' row via `UNION ALL` if the task is a summary report and it makes sense for the metrics.
 
-                        WITH report_data AS (
-                            SELECT
-                                pm.pm_name As PM Name,
-                                COALESCE(ejw.num_jobs_written, 0) AS No. of Jobs Written,
-                                COALESCE(ejw.total_original_contract_written, 0) AS Total Original Contract Written,
-                                COALESCE(
-                                ejw.total_original_contract_written / NULLIF(ejw.num_jobs_written, 0), 0
-                                ) AS Avg Job Size
-                            FROM estimator_analysis_pm pm
-                            LEFT JOIN estimator_analysis_jobs_written ejw ON pm.pm_id = ejw.pm_id
-                            )
+        **=== TASK ===**
+        Task Description: {{{{TASK_DESCRIPTION_PLACEHOLDER}}}}
 
-                            -- Main report rows
-                            SELECT * FROM report_data
+        Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
+        Company ID for Query: :{{{{COMPANY_ID_PLACEHOLDER}}}}
+        Date for Query: {{{{Required_DATE}}}}
 
-                            UNION ALL
-
-                            -- Totals row
-                            SELECT
-                            'Total' AS PM Name,
-                            SUM(No. of Jobs Written),
-                            SUM(Total Original Contract Written),
-                            SUM(Total Original Contract Written) / NULLIF(SUM(No. of Jobs Written), 0) AS Avg Job Size
-                            FROM report_data;
-                        Follow all above instructions. Every instructions is important.
-                        
-                        - **Final SELECT Clause:**
-                           - **CRITICAL:** Select fields by extracting them from the *unnested element aliases* from 
-                           the relevant CTE used in the FROM clause.
-                           - Assign clear aliases to the selected fields using `AS`. Example: `SELECT (
-                           pms_data.pms_elem ->> 'PM_Name') AS project_manager_name, SUM((co_data.co_elem ->> 'Change 
-                           Orders')::FLOAT) AS total_change_orders ...`
-                           - Also add pm_id for every pm name.
-                           
-                        Do not add pm_id column in final result.
-                        **=== TASK ===**
-                        Task Description: {{{{TASK_DESCRIPTION_PLACEHOLDER}}}}
-                        Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
-                        Company ID for Query: {{{{COMPANY_ID_PLACEHOLDER}}}} # This is the ID to use in the 
-                        Date for Query: {{{{Required_DATE}}}}
-                        :company_id parameter
-                        :to_date parameter
-
-                        **=== OUTPUT FORMAT ===**
-                        - Raw PostgreSQL query ONLY.
-                        - **MUST** include the placeholder `:company_id and :to_date` for filtering the `company_data` table 
-                        within the CTEs.
-                        - No explanations, comments, markdown (like ```sql).
-                        - ALL queries MUST begin with a WITH clause that defines CTEs for unnesting arrays.
-                        """
+        **=== OUTPUT FORMAT ===**
+        - Raw PostgreSQL query ONLY.
+        - MUST include placeholders `:company_id` and `:to_date`.
+        - No explanations, comments, markdown.
+        """
         # --- *** End Modified SQL Instruction *** ---
 
         try:
@@ -855,10 +816,11 @@ def process_prompt(prompt: str, company_id: int, to_date:datetime.date) -> List[
                 sql_prompt = (
                     f"Task Description: {task_description}\n"
                     f"Required Data Summary: {required_data}\n"
-                    f"Company ID for Query: {company_id}\n" # Inject the actual company_id
-                    f"to_date for Query: {to_date}\n" # Inject the actual Date
+                    f"Company ID for Query: {company_id}\n"  # Inject the actual company_id
+                    f"to_date for Query: {to_date}\n"  # Inject the actual Date
                     f"Generate the PostgreSQL query using ONLY the provided schema and adhering strictly to the JSONB "
-                    f"querying rules, including the :company_id and :to_date parameter and correct field access in SELECT/GROUP "
+                    f"querying rules, including the :company_id and :to_date parameter and correct field access in "
+                    f"SELECT/GROUP "
                     f"BY/ORDER BY."
                 )  # Added reminder
 
@@ -907,7 +869,8 @@ def process_prompt(prompt: str, company_id: int, to_date:datetime.date) -> List[
                 logger.info(f"    Fetching data using JSONB query...")
                 # --- Use the new function with parameter binding ---
                 data = sql_query_with_params(
-                    sql_query_text, params={"company_id": company_id,"to_date": to_date}
+                    sql_query_text,
+                    params={"company_id": company_id, "to_date": to_date},
                 )
 
                 if not data:
