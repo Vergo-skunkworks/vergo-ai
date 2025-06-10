@@ -55,15 +55,15 @@ def get_db_connection():
 
     # For Cloud SQL Connector using Unix domain sockets
     # Format: postgresql+psycopg2://user:password@/dbname?host=/cloudsql/instance_connection_name
-    # conn_string = (
-    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-    #     f"?host=/cloudsql/{instance_connection_name}"
-    # )
-
     conn_string = (
         f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-        f"?host=35.190.189.103"
+        f"?host=/cloudsql/{instance_connection_name}"
     )
+
+    # conn_string = (
+    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+    #     f"?host=35.190.189.103"
+    # )
 
     # conn_string = f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@{db_host}:{db_port}/{db_name}"
 
@@ -139,7 +139,7 @@ def sql_query_with_params(query: str, params: dict = None) -> List[Dict[str, Any
         raise
 
 
-def get_company_data_schema(company_id: int, to_date: datetime.date) -> str:
+def get_company_data_schema(company_id: int) -> str:
     """
     Retrieves the 'data_schema' JSONB content for a specific company
     from the 'company_data' table.
@@ -154,7 +154,7 @@ def get_company_data_schema(company_id: int, to_date: datetime.date) -> str:
     logger.debug(f"Retrieving data_schema for company_id: {company_id}")
     # Ensure company_id is treated as an integer in the query parameter
     query = text(
-        "SELECT data_schema FROM company_data WHERE company_id = :company_id AND to_date=:to_date LIMIT 1"
+        "SELECT data_schema FROM company_data WHERE company_id = :company_id LIMIT 1"
     )
     schema_json = "{}"  # Default to empty JSON string
 
@@ -162,7 +162,7 @@ def get_company_data_schema(company_id: int, to_date: datetime.date) -> str:
         with get_db_connection() as (conn, engine):
             # Execute query with parameter binding
             result = conn.execute(
-                query, {"company_id": company_id, "to_date": to_date}
+                query, {"company_id": company_id}
             ).fetchone()
 
             if result and result[0]:
@@ -325,7 +325,7 @@ def parse_tasks_response(response_text):
 
 
 def process_prompt(
-        prompt: str, company_id: int, to_date: datetime.date
+        prompt: str, company_id: int
 ) -> List[Dict[str, Any]]:
     """
     Processes a user prompt against data in the 'company_data' table's JSONB columns
@@ -359,7 +359,7 @@ def process_prompt(
         # ---- Step 2a: Get Schema ----
         logger.info("\n📜 STEP 2a: FETCHING SCHEMA FROM company_data TABLE")
         database_schema_json_or_error = get_company_data_schema(
-            company_id, to_date
+            company_id
         )  # Use the new function
 
         if database_schema_json_or_error.startswith("Error:"):
@@ -425,7 +425,7 @@ def process_prompt(
                                     
                                     The data for these tasks resides in a single table 'company_data' within a JSONB 
                                     column named 'data'. You MUST filter 
-                                    by company_id = {company_id} and to_date={to_date}.
+                                    by company_id = {company_id}.
                                     The structure of this 'data' column for the relevant company is described by the 
                                     'Data Schema'. The keys in the 'Data 
                                     Schema' (e.g., "pms", "change_order") correspond to the top-level keys within the 
@@ -433,7 +433,7 @@ def process_prompt(
                                     an array of JSON objects.
                                     
                                     Data Schema (Structure within the 'data' JSONB column of 'company_data' for 
-                                    company_id={company_id}) and to_date={to_date}:
+                                    company_id={company_id}):
                                     {database_schema_json}
                                     
                                     **Guidelines for Defining Tasks:**
@@ -600,8 +600,7 @@ def process_prompt(
             Columns:
             company_id (TEXT): Unique identifier for the company.
             data (JSONB): Contains all company-uploaded file data.
-            to_date (DATE): Date of the data snapshot.
-            Mandatory Filter: Every query must include WHERE company_id = :company_id AND to_date = :to_date in each Common Table Expression (CTE) that accesses the company_data table. The placeholders :company_id and :to_date will be provided in the task details.
+            Mandatory Filter: Every query must include WHERE company_id = :company_id in each Common Table Expression (CTE) that accesses the company_data table. The placeholders :company_id and :to_date will be provided in the task details.
             JSONB Schema
             Structure: The JSONB data column’s structure is provided as {database_schema_json}.
             Content: The data column contains top-level keys (e.g., records, details) that map to arrays of JSON objects.
@@ -626,7 +625,7 @@ def process_prompt(
                 WITH records_data AS (
                 SELECT company_id, jsonb_array_elements(data -> 'records') AS elem
                 FROM company_data
-                WHERE company_id = :company_id AND to_date = :to_date
+                WHERE company_id = :company_id
                 )
                 Multiple CTEs: Chain multiple CTEs with commas (e.g., WITH records_data AS (...), details_data AS (...)).
                 Naming: Use descriptive CTE names based on the array key (e.g., records_data for data -> 'records').
@@ -721,7 +720,6 @@ def process_prompt(
                 Task Description: {{{{TASK_DESCRIPTION_PLACEHOLDER}}}}
                 Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
                 Company ID for Query: {{{{COMPANY_ID_PLACEHOLDER}}}}
-                Date for Query: {{{{Required_DATE}}}}
                 Parameters: Use :company_id and :to_date in the query.
                 Output Format
                 Output a raw PostgreSQL query only.
@@ -790,7 +788,6 @@ def process_prompt(
                     f"Task Description: {task_description}\n"
                     f"Required Data Summary: {required_data}\n"
                     f"Company ID for Query: {company_id}\n"  # Inject the actual company_id
-                    f"to_date for Query: {to_date}\n"  # Inject the actual Date
                     f"Generate the PostgreSQL query using ONLY the provided schema and adhering strictly to the JSONB "
                     f"querying rules, including the :company_id and :to_date parameter and correct field access in "
                     f"SELECT/GROUP "
@@ -843,7 +840,7 @@ def process_prompt(
                 # --- Use the new function with parameter binding ---
                 data = sql_query_with_params(
                     sql_query_text,
-                    params={"company_id": company_id, "to_date": to_date},
+                    params={"company_id": company_id},
                 )
 
                 if not data:

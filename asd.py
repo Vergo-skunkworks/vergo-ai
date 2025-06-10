@@ -21,25 +21,21 @@ logger = logging.getLogger(__name__)
 # --- Load Environment Variables ---
 load_dotenv()
 
-# --- Constants moved from main.py ---
+# --- Constants ---
 ALLOWED_EXTENSIONS = {"xlsx", "xls"}
-
 
 def allowed_file(filename: str) -> bool:
     """Checks if the file extension is allowed."""
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
-
 @contextmanager
 def get_db_connection():
     """Provides a managed database connection."""
-    # Required environment variables
     db_name = os.environ.get("DB_NAME")
     db_user = os.environ.get("DB_USER")
     db_password = os.environ.get("DB_PASSWORD")
     instance_connection_name = os.environ.get("INSTANCE_CONNECTION_NAME")
 
-    # Validate required environment variables
     if not all([db_name, db_user, db_password, instance_connection_name]):
         missing_vars = []
         if not db_name:
@@ -50,29 +46,10 @@ def get_db_connection():
             missing_vars.append("DB_PASSWORD")
         if not instance_connection_name:
             missing_vars.append("INSTANCE_CONNECTION_NAME")
-
-        raise ValueError(
-            f"Missing required environment variables: {', '.join(missing_vars)}"
-        )
+        raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
     from urllib.parse import quote_plus
-
-    # For Cloud SQL Connector using Unix domain sockets
-    # Format: postgresql+psycopg2://user:password@/dbname?host=/cloudsql/instance_connection_name
-    # conn_string = (
-    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-    #     f"?host=35.190.189.103"
-    # )
-
-    # Alternative format (both should work):
-    conn_string = (
-        f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-        f"?host=/cloudsql/{instance_connection_name}"
-    )
-    # conn_string = (
-    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-    #     f"?host=/cloudsql/{instance_connection_name}"
-    # )
+    conn_string = f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}?host=35.190.189.103"
 
     engine = None
     conn = None
@@ -83,7 +60,7 @@ def get_db_connection():
             pool_size=5,
             max_overflow=10,
             pool_timeout=30,
-            pool_recycle=1800,  # 30 minutes
+            pool_recycle=1800,
         )
         conn = engine.connect()
         logger.debug("Database connection successful.")
@@ -99,14 +76,13 @@ def get_db_connection():
             engine.dispose()
             logger.debug("Database engine disposed.")
 
-
 def sanitize_name(name: Any) -> str:
     """Sanitizes a string to be a valid SQL table/column name or JSON key."""
     if not isinstance(name, str):
         name = str(name)
     name = name.lower()
     name = name.replace(" ", "_").replace("-", "_")
-    name = re.sub(r"[^\w._]+", "", name)  # Allow '.', '_', alphanumeric
+    name = re.sub(r"[^\w._]+", "", name)
     name = name.lstrip("_").lstrip(".")
     name = name.rstrip("_").rstrip(".")
 
@@ -114,9 +90,8 @@ def sanitize_name(name: Any) -> str:
         return "invalid_name"
     return name
 
-
 def setup_jsonb_table():
-    """Creates or updates the JSONB table with data and data_schema columns."""
+    """Creates or updates the JSONB table with company_id as primary key and report_metadata."""
     with get_db_connection() as (conn, engine):
         try:
             result = conn.execute(
@@ -135,22 +110,9 @@ def setup_jsonb_table():
             );
             """
             conn.execute(text(create_table_sql))
-            conn.commit()
-            logger.debug("CREATE TABLE statement executed.")
+            logger.debug("CREATE TABLE company_data executed.")
 
-            table_check_sql = """
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables
-                WHERE table_schema = 'public'
-                AND table_name = 'company_data'
-            );
-            """
-            table_exists = conn.execute(text(table_check_sql)).scalar()
-            if not table_exists:
-                raise RuntimeError(
-                    "Failed to create company_data table in public schema."
-                )
-
+            # Add report_metadata column if it doesn't exist
             alter_table_sql = """
             DO $$
             BEGIN
@@ -159,20 +121,19 @@ def setup_jsonb_table():
                     FROM information_schema.columns
                     WHERE table_schema = 'public'
                     AND table_name = 'company_data'
-                    AND column_name = 'data_schema'
+                    AND column_name = 'report_metadata'
                 ) THEN
                     ALTER TABLE public.company_data
-                    ADD COLUMN data_schema JSONB NOT NULL DEFAULT '{}'::jsonb;
+                    ADD COLUMN report_metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
                 END IF;
             END
             $$;
             """
             conn.execute(text(alter_table_sql))
-            conn.commit()
-            logger.debug("ALTER TABLE statement executed to ensure data_schema column.")
+            logger.debug("ALTER TABLE company_data to add report_metadata executed.")
 
             trigger_sql = """
-            CREATE OR REPLACE FUNCTION public.update_updated_at_column()
+            CREATE OR REPLACE FUNCTION public.update_company_data_updated_at()
             RETURNS TRIGGER AS $$
             BEGIN
                 NEW.updated_at = CURRENT_TIMESTAMP;
@@ -183,55 +144,60 @@ def setup_jsonb_table():
             DROP TRIGGER IF EXISTS update_company_data_timestamp ON public.company_data;
             CREATE TRIGGER update_company_data_timestamp
             BEFORE UPDATE ON public.company_data
-            FOR EACH ROW
-            EXECUTE FUNCTION public.update_updated_at_column();
+            FOR EACH ROW EXECUTE FUNCTION public.update_company_data_updated_at();
             """
             conn.execute(text(trigger_sql))
             conn.commit()
-            logger.debug("Trigger setup completed.")
+            logger.debug("Triggers for company_data created.")
+
+            table_check_sql = """
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public'
+                AND table_name = 'company_data'
+            );
+            """
+            table_exists = conn.execute(text(table_check_sql)).scalar()
+            if not table_exists:
+                raise RuntimeError("Failed to create company_data table in public schema.")
 
             inspector = inspect(engine)
-            inspector.clear_cache()  # ensure fresh inspection
-            if not inspector.has_table("company_data", schema="public"):
-                raise RuntimeError(
-                    "company_data table not found in public schema after creation."
-                )
-
             columns = inspector.get_columns("company_data", schema="public")
             column_names = [col["name"] for col in columns]
             expected_columns = {
                 "company_id",
                 "data",
                 "data_schema",
+                "report_metadata",
                 "created_at",
                 "updated_at",
             }
             if not expected_columns.issubset(column_names):
                 missing = expected_columns - set(column_names)
-                raise RuntimeError(
-                    f"Table company_data is missing expected columns: {missing}"
-                )
+                raise RuntimeError(f"Table company_data is missing columns: {missing}")
 
-            logger.info("JSONB table setup complete with data_schema column.")
+            pk_columns = inspector.get_pk_constraint("company_data", schema="public")["constrained_columns"]
+            if pk_columns != ["company_id"]:
+                raise RuntimeError(f"Expected primary key (company_id), found {pk_columns}")
+
+            logger.info("JSONB table setup complete with primary key (company_id) and report_metadata.")
         except Exception as e:
             logger.error(f"❌ Error setting up JSONB table: {e}", exc_info=True)
             if conn:
                 conn.rollback()
             raise
 
-
 def get_or_create_company_data(
-    company_id: int,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    company_id: int
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     """
-    Gets existing company data and schema or creates a new empty structure
-    for a given company_id.
+    Gets existing company data, schema, and metadata for a given company_id or creates a new empty structure.
     """
     with get_db_connection() as (conn, engine):
         try:
             result = conn.execute(
                 text(
-                    "SELECT data, data_schema,report_metadata FROM public.company_data WHERE company_id = :company_id"
+                    "SELECT data, data_schema, report_metadata FROM public.company_data WHERE company_id = :company_id"
                 ),
                 {"company_id": company_id},
             ).fetchone()
@@ -242,7 +208,7 @@ def get_or_create_company_data(
                 data_schema = dict(data_schema) if data_schema else {}
                 report_metadata = dict(report_metadata) if report_metadata else {}
                 logger.info(
-                    f"Retrieved existing data and schema for company_id {company_id}"
+                    f"Retrieved existing data, schema, and metadata for company_id {company_id}"
                 )
                 return company_data, data_schema, report_metadata
             else:
@@ -263,9 +229,9 @@ def get_or_create_company_data(
                 )
                 conn.commit()
                 logger.info(
-                    f"Created new data and schema structure for company_id {company_id}"
+                    f"Created new data, schema, and metadata structure for company_id {company_id}"
                 )
-                return empty_data, empty_schema
+                return empty_data, empty_schema, empty_metadata
         except SQLAlchemyError as e:
             logger.error(
                 f"❌ Error in get_or_create_company_data for company_id {company_id}: {e}",
@@ -275,32 +241,37 @@ def get_or_create_company_data(
                 conn.rollback()
             raise
 
-
-
-# def get_previous_company_data(
-#         company_id: int, to_date: datetime.date
-# ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-#     """Fetches data and schema from the most recent row before to_date for company_id."""
-#     with get_db_connection() as (conn, engine):
-#         try:
-#             result = conn.execute(
-#                 text(
-#                     "SELECT data, data_schema FROM public.company_data "
-#                     "WHERE company_id = :company_id AND to_date < :to_date "
-#                     "ORDER BY to_date DESC LIMIT 1"
-#                 ),
-#                 {"company_id": company_id, "to_date": to_date},
-#             ).fetchone()
-#             if result:
-#                 return dict(result[0]) if result[0] else {}, (
-#                     dict(result[1]) if result[1] else {}
-#                 )
-#             return {}, {}
-#         except SQLAlchemyError as e:
-#             logger.error(f"❌ Error fetching previous data: {e}", exc_info=True)
-#             return {}, {}
-
-
+def update_company_jsonb(
+    company_id: int,
+    data: Dict[str, Any],
+    data_schema: Dict[str, Any],
+    report_metadata: Dict[str, Any]
+):
+    """Updates the JSONB data, schema, and metadata for a company."""
+    with get_db_connection() as (conn, engine):
+        try:
+            conn.execute(
+                text(
+                    "UPDATE public.company_data SET data = :data, data_schema = :data_schema, report_metadata = :report_metadata"
+                    " WHERE company_id = :company_id"
+                ),
+                {
+                    "company_id": company_id,
+                    "data": json.dumps(data),
+                    "data_schema": json.dumps(data_schema),
+                    "report_metadata": json.dumps(report_metadata),
+                },
+            )
+            conn.commit()
+            logger.info(f"Updated JSONB data, schema, and metadata for company_id {company_id}")
+        except SQLAlchemyError as e:
+            logger.error(
+                f"❌ Error updating company data for company_id {company_id}: {e}",
+                exc_info=True,
+            )
+            if conn:
+                conn.rollback()
+            raise
 
 def infer_excel_col_schema(df: pd.DataFrame) -> Dict[str, str]:
     """
@@ -321,72 +292,36 @@ def infer_excel_col_schema(df: pd.DataFrame) -> Dict[str, str]:
             schema[sanitized_col_name] = "DATETIME"
         elif pd.api.types.is_string_dtype(dtype) or pd.api.types.is_object_dtype(dtype):
             try:
-                # Attempt to check if non-NA values are all datetime-like
-                # This is a heuristic and might not cover all edge cases or mixed-type columns well.
                 if (
-                        df[col]
-                                .dropna()
-                                .map(
-                            lambda x: isinstance(
-                                x, (datetime.datetime, datetime.date, pd.Timestamp)
-                            )
+                    df[col]
+                    .dropna()
+                    .map(
+                        lambda x: isinstance(
+                            x, (datetime.datetime, datetime.date, pd.Timestamp)
                         )
-                                .all()
+                    )
+                    .all()
                 ):
                     schema[sanitized_col_name] = "DATETIME"
                 else:
                     schema[sanitized_col_name] = "TEXT"
-            except Exception:  # Fallback for complex object types or errors during map
+            except Exception:
                 schema[sanitized_col_name] = "TEXT"
         else:
-            schema[sanitized_col_name] = "UNKNOWN"  # Should be rare
+            schema[sanitized_col_name] = "UNKNOWN"
     return schema
 
-
-def update_company_jsonb(
-    company_id: int, data: Dict[str, Any], data_schema: Dict[str, Any], report_metadata: Dict[str, Any]
-):
-    """Updates the JSONB data and schema for a company."""
-    with get_db_connection() as (conn, engine):
-        try:
-            conn.execute(
-                text(
-                    "UPDATE public.company_data SET data = :data,"
-                    " data_schema = :data_schema, report_metadata = :report_metadata WHERE company_id = :company_id"
-                ),
-                {
-                    "company_id": company_id,
-                    "data": json.dumps(data),
-                    "data_schema": json.dumps(data_schema),
-                    "report_metadata": json.dumps(report_metadata),
-                },
-            )
-            conn.commit()
-            logger.info(f"Updated JSONB data and schema for company_id {company_id}")
-        except SQLAlchemyError as e:
-            logger.error(
-                f"❌ Error updating company data for company_id {company_id}: {e}",
-                exc_info=True,
-            )
-            if conn:
-                conn.rollback()
-            raise
-
-
-
 def process_excel_report_to_jsonb(
-    report_key: str,  # Expects already sanitized report name
+    report_key: str,
     file_source: Union[str, io.BytesIO],
-    company_id: int,
+    company_id: int
 ) -> Dict[str, Any]:
     """
-    Processes an Excel file (first sheet only), stores its data under report_key
-    in JSONB, and infers its schema. Replaces existing data/schema for this report_key.
+    Processes an Excel file (first sheet only), updates report data and metadata for the given company_id.
     """
     logger.info(f"Processing report '{report_key}' for company_id {company_id}.")
 
-    company_data, data_schema,report_metadata = get_or_create_company_data(company_id)
-    # report_key is assumed to be pre-sanitized by the calling handler
+    company_data, data_schema, report_metadata = get_or_create_company_data(company_id)
 
     try:
         df = pd.read_excel(file_source, sheet_name=0, engine="openpyxl")
@@ -413,9 +348,7 @@ def process_excel_report_to_jsonb(
             for record in records:
                 serializable_record = {}
                 for key, value in record.items():
-                    s_key = sanitize_name(
-                        key
-                    )  # Sanitize individual column keys from Excel
+                    s_key = sanitize_name(key)
                     if isinstance(
                         value, (pd.Timestamp, datetime.datetime, datetime.date)
                     ):
@@ -431,12 +364,13 @@ def process_excel_report_to_jsonb(
             )
             company_data[report_key] = serializable_records
             num_records = len(serializable_records)
-            # Update report metadata with last_updated timestamp
-            report_metadata[report_key] = {
-                "last_updated": datetime.datetime.utcnow().isoformat() + "Z"
-            }
-            print(report_metadata)
-            update_company_jsonb(company_id, company_data, data_schema,report_metadata)
+
+        # Update report metadata with last_updated timestamp
+        report_metadata[report_key] = {
+            "last_updated": datetime.datetime.utcnow().isoformat() + "Z"
+        }
+
+        update_company_jsonb(company_id, company_data, data_schema, report_metadata)
 
         return {
             "status": "success",
@@ -444,10 +378,9 @@ def process_excel_report_to_jsonb(
             "report_name": report_key,
             "records_processed": num_records,
             "schema_updated": data_schema.get(report_key, {}),
+            "last_updated": report_metadata[report_key]["last_updated"]
         }
-    except (
-        ValueError
-    ) as e:  # Catches issues like bad Excel file format if pandas raises ValueError
+    except ValueError as e:
         logger.error(
             f"❌ Invalid Excel file format or content for report '{report_key}': {e}",
             exc_info=True,
@@ -457,16 +390,14 @@ def process_excel_report_to_jsonb(
             "report_name": report_key,
             "message": f"Invalid Excel file format or content: {str(e)}",
         }
-    except FileNotFoundError:  # Only if file_source was a string path and not found
-        logger.error(
-            f"❌ File not found: {file_source}", exc_info=True
-        )  # Should not happen with BytesIO
+    except FileNotFoundError:
+        logger.error(f"❌ File not found: {file_source}", exc_info=True)
         return {
             "status": "error",
             "report_name": report_key,
             "message": f"File not found: {file_source}",
         }
-    except ImportError as e:  # Missing openpyxl
+    except ImportError as e:
         logger.error(
             f"❌ Required Excel engine (openpyxl) not installed: {e}", exc_info=True
         )
@@ -485,42 +416,15 @@ def process_excel_report_to_jsonb(
         )
         return {"status": "error", "report_name": report_key, "message": str(e)}
 
-def get_report_metadata(company_id: int) -> Dict[str, Any]:
-    """Fetches report metadata for a given company_id."""
-    with get_db_connection() as (conn, engine):
-        try:
-            result = conn.execute(
-                text("SELECT report_metadata FROM public.company_data WHERE company_id = :company_id"),
-                {"company_id": company_id}
-            ).fetchone()
-            if result:
-                metadata = dict(result[0]) if result[0] else {}
-                return {
-                    "status": "success",
-                    "company_id": company_id,
-                    "report_metadata": metadata
-                }
-            return {
-                "status": "error",
-                "message": f"No data found for company_id {company_id}"
-            }
-        except SQLAlchemyError as e:
-            logger.error(f"❌ Error fetching report metadata for company_id {company_id}: {e}", exc_info=True)
-            return {"status": "error", "message": str(e)}
-
 def handle_excel_upload_request(
     excel_file_storage: FileStorage,
     company_id_str: Union[str, None],
-    report_name_original: Union[str, None],
+    report_name_original: Union[str, None]
 ) -> Tuple[Dict[str, Any], int]:
     """
-    Handles the overall Excel upload request, including validation,
-    file reading, and calling the processing function.
-    Returns a response dictionary and an HTTP status code.
+    Handles the Excel upload request, including validation, file reading, and processing.
     """
-    if (
-        not excel_file_storage
-    ):  # Should be caught by Flask route if 'excel_file' not in request.files
+    if not excel_file_storage:
         return {
             "status": "error",
             "message": "No 'excel_file' object provided to handler",
@@ -558,12 +462,12 @@ def handle_excel_upload_request(
     file_content_stream = None
     try:
         file_content_stream = io.BytesIO(excel_file_storage.read())
-        file_content_stream.seek(0)  # Reset stream position to the beginning for pandas
+        file_content_stream.seek(0)
 
         result_data = process_excel_report_to_jsonb(
             report_key=report_key,
             file_source=file_content_stream,
-            company_id=company_id,
+            company_id=company_id
         )
 
         if result_data.get("status") == "success":
@@ -582,14 +486,11 @@ def handle_excel_upload_request(
             if (
                 "Invalid Excel file format" in error_message
                 or "File not found" in error_message
-            ):  # file not found
-                # from processor
-                return result_data, 400  # Bad request
-            return result_data, 500  # Internal server error for other processing issues
+            ):
+                return result_data, 400
+            return result_data, 500
 
-    except (
-        Exception
-    ) as e:  # Catch any other unexpected errors during this handling phase
+    except Exception as e:
         logger.error(
             f"Handler: General error for report '{report_key}' (company {company_id}): {e}",
             exc_info=True,
@@ -602,10 +503,31 @@ def handle_excel_upload_request(
         if file_content_stream:
             file_content_stream.close()
 
+def get_report_metadata(company_id: int) -> Dict[str, Any]:
+    """Fetches report metadata for a given company_id."""
+    with get_db_connection() as (conn, engine):
+        try:
+            result = conn.execute(
+                text("SELECT report_metadata FROM public.company_data WHERE company_id = :company_id"),
+                {"company_id": company_id}
+            ).fetchone()
+            if result:
+                metadata = dict(result[0]) if result[0] else {}
+                return {
+                    "status": "success",
+                    "company_id": company_id,
+                    "report_metadata": metadata
+                }
+            return {
+                "status": "error",
+                "message": f"No data found for company_id {company_id}"
+            }
+        except SQLAlchemyError as e:
+            logger.error(f"❌ Error fetching report metadata for company_id {company_id}: {e}", exc_info=True)
+            return {"status": "error", "message": str(e)}
 
 def get_jsonb_data_summary(company_id: Union[int, None] = None) -> Dict[str, Any]:
     """Returns a summary of the JSONB data and schema in the database."""
-    # ... (This function remains unchanged from your original)
     with get_db_connection() as (conn, engine):
         try:
             if company_id:
