@@ -55,15 +55,15 @@ def get_db_connection():
 
     # For Cloud SQL Connector using Unix domain sockets
     # Format: postgresql+psycopg2://user:password@/dbname?host=/cloudsql/instance_connection_name
-    conn_string = (
-        f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-        f"?host=/cloudsql/{instance_connection_name}"
-    )
-
     # conn_string = (
     #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-    #     f"?host=35.190.189.103"
+    #     f"?host=/cloudsql/{instance_connection_name}"
     # )
+
+    conn_string = (
+        f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+        f"?host=35.190.189.103"
+    )
 
     # conn_string = f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@{db_host}:{db_port}/{db_name}"
 
@@ -598,7 +598,7 @@ def process_prompt(
             Data Source
             Table: All data comes from a single table named company_data.
             Columns:
-            company_id (TEXT): Unique identifier for the company.
+            company_id (INT): Unique identifier for the company.
             data (JSONB): Contains all company-uploaded file data.
             Mandatory Filter: Every query must include WHERE company_id = :company_id in each Common Table Expression (CTE) that accesses the company_data table. The placeholders :company_id and :to_date will be provided in the task details.
             JSONB Schema
@@ -653,6 +653,7 @@ def process_prompt(
                 Use standard SQL JOIN (INNER or LEFT, based on task requirements).
                 Join on extracted and casted identifier fields: (records_data.elem ->> 'id')::FLOAT::INTEGER = (details_data.elem ->> 'id')::FLOAT::INTEGER.
                 Use LEFT JOIN only if the task requires including rows with missing matches; otherwise, prefer INNER JOIN to avoid duplicate rows.
+                Do not use Full outer join. Strictly follow it as can cause syntax error
             Aggregation:
                 Use standard SQL aggregates (SUM, AVG, COUNT, etc.) on casted fields.
                 For aggregation tasks, create a CTE to compute aggregates:
@@ -662,7 +663,7 @@ def process_prompt(
                         SUM((elem ->> 'value1')::FLOAT) AS total_value
                 FROM company_data,
                     jsonb_array_elements(data -> 'records') AS elem
-                WHERE company_id = :company_id AND to_date = :to_date
+                WHERE company_id = :company_id
                 GROUP BY (elem ->> 'id')::FLOAT::INTEGER
                 )
                 Use final SELECT aliases in GROUP BY and ORDER BY clauses (e.g., GROUP BY name).
@@ -704,7 +705,7 @@ def process_prompt(
                 The query must follow this structure:
         
                 Start with a WITH clause defining CTEs for unnesting arrays.
-                Each CTE must include WHERE company_id = :company_id AND to_date = :to_date.
+                Each CTE must include WHERE company_id = :company_id.
                 Use INNER JOIN unless LEFT JOIN is explicitly required.
                 Apply IS NOT NULL for all selected fields and fields used in WHERE or ORDER BY.
                 Use COALESCE and NULLIF for safe calculations.
@@ -723,7 +724,7 @@ def process_prompt(
                 Parameters: Use :company_id and :to_date in the query.
                 Output Format
                 Output a raw PostgreSQL query only.
-                Must include placeholders :company_id and :to_date for filtering the company_data table within CTEs.
+                Must include placeholders :company_id for filtering the company_data table within CTEs.
                 Do not include comments, explanations, or markdown (e.g., ```sql).
                 All queries must begin with a WITH clause defining CTEs for unnesting arrays.
                 Verify syntax before outputting (e.g., check for missing commas, correct CTE structure)."""
@@ -732,7 +733,7 @@ def process_prompt(
         try:
             # Initialize SQL model with the new system instruction
             sql_gemini = initialize_gemini_model(
-                system_instruction=sql_instruction, model_name="gemini-1.5-flash"
+                system_instruction=sql_instruction, model_name="gemini-1.5-pro"
             )  # Or a more powerful model if needed
             logger.debug("SQL Gemini model initialized for JSONB querying.")
         except Exception as model_init_error:

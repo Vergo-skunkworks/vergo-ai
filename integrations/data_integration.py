@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, text, inspect
 import datetime
 from dotenv import load_dotenv
 import io
-from typing import Union, Tuple, Dict, Any
+from typing import Union, Tuple, Dict, Any, List
 from werkzeug.datastructures import FileStorage
 
 # --- Configure Logging ---
@@ -59,16 +59,16 @@ def get_db_connection():
 
     # For Cloud SQL Connector using Unix domain sockets
     # Format: postgresql+psycopg2://user:password@/dbname?host=/cloudsql/instance_connection_name
-    # conn_string = (
-    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-    #     f"?host=35.190.189.103"
-    # )
-
-    # Alternative format (both should work):
     conn_string = (
         f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-        f"?host=/cloudsql/{instance_connection_name}"
+        f"?host=35.190.189.103"
     )
+
+    # Alternative format (both should work):
+    # conn_string = (
+    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+    #     f"?host=/cloudsql/{instance_connection_name}"
+    # )
     # conn_string = (
     #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
     #     f"?host=/cloudsql/{instance_connection_name}"
@@ -222,7 +222,7 @@ def setup_jsonb_table():
 
 def get_or_create_company_data(
     company_id: int,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     """
     Gets existing company data and schema or creates a new empty structure
     for a given company_id.
@@ -265,7 +265,7 @@ def get_or_create_company_data(
                 logger.info(
                     f"Created new data and schema structure for company_id {company_id}"
                 )
-                return empty_data, empty_schema
+                return empty_data, empty_schema, empty_metadata
         except SQLAlchemyError as e:
             logger.error(
                 f"❌ Error in get_or_create_company_data for company_id {company_id}: {e}",
@@ -300,6 +300,62 @@ def get_or_create_company_data(
 #             logger.error(f"❌ Error fetching previous data: {e}", exc_info=True)
 #             return {}, {}
 
+def update_column_descriptions(company_id: int, report_name: str, column_names: List[str]) -> None:
+    """
+    Updates the `description` column in the `company_data` table to reflect column names
+    of the uploaded report. Adds missing columns with empty descriptions.
+
+    Args:
+        company_id: The company_id to target.
+        report_name: The name of the uploaded report.
+        column_names: List of column names in the uploaded file.
+    """
+    try:
+        with get_db_connection() as (conn, engine):
+            # Step 1: Fetch existing description JSON
+            query = text("SELECT description FROM company_data WHERE company_id = :company_id LIMIT 1")
+            result = conn.execute(query, {"company_id": company_id}).fetchone()
+            current_description = result[0] if result and result[0] else {}
+
+            # Ensure it's a dict
+            if isinstance(current_description, str):
+                current_description = json.loads(current_description)
+            elif not isinstance(current_description, dict):
+                current_description = {}
+
+            # Step 2: Get existing columns for the report
+            existing_columns = current_description.get(report_name, {})
+
+            # Step 3: Check if columns match
+            existing_column_set = set(existing_columns.keys())
+            uploaded_column_set = set(column_names)
+
+            if existing_column_set == uploaded_column_set:
+                logger.info("Column structure matches existing. No update required.")
+                return  # Structure is identical
+            logger.info("Updating Description of columns")
+            # Step 4: Update description
+            updated_columns = {col: existing_columns.get(col, "") for col in column_names}
+            current_description[report_name] = updated_columns
+
+            # Step 5: Write back updated JSON
+            update_query = text("""
+                UPDATE company_data
+                SET description = :description
+                WHERE company_id = :company_id
+            """)
+            logger.info("Below is updated description")
+            print(current_description)
+            conn.execute(update_query, {
+                "description": json.dumps(current_description),
+                "company_id": company_id
+            })
+            conn.commit()
+            logger.info(f"Updated column descriptions for report '{report_name}'.")
+
+    except Exception as e:
+        logger.error(f"❌ Failed to update column descriptions: {e}", exc_info=True)
+        raise
 
 
 def infer_excel_col_schema(df: pd.DataFrame) -> Dict[str, str]:
@@ -437,6 +493,8 @@ def process_excel_report_to_jsonb(
             }
             print(report_metadata)
             update_company_jsonb(company_id, company_data, data_schema,report_metadata)
+            column_names = df.columns.tolist()
+            update_column_descriptions(company_id,report_key,column_names)
 
         return {
             "status": "success",
