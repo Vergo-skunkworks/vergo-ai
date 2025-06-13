@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # --- Constants moved from main.py ---
-ALLOWED_EXTENSIONS = {"xlsx", "xls"}
+ALLOWED_EXTENSIONS = {"xlsx", "xls", "csv"}
 
 
 def allowed_file(filename: str) -> bool:
@@ -345,7 +345,6 @@ def update_column_descriptions(company_id: int, report_name: str, column_names: 
                 WHERE company_id = :company_id
             """)
             logger.info("Below is updated description")
-            print(current_description)
             conn.execute(update_query, {
                 "description": json.dumps(current_description),
                 "company_id": company_id
@@ -434,6 +433,7 @@ def process_excel_report_to_jsonb(
     report_key: str,  # Expects already sanitized report name
     file_source: Union[str, io.BytesIO],
     company_id: int,
+    file_extension: str = None,
 ) -> Dict[str, Any]:
     """
     Processes an Excel file (first sheet only), stores its data under report_key
@@ -442,10 +442,20 @@ def process_excel_report_to_jsonb(
     logger.info(f"Processing report '{report_key}' for company_id {company_id}.")
 
     company_data, data_schema,report_metadata = get_or_create_company_data(company_id)
-    # report_key is assumed to be pre-sanitized by the calling handler
-
     try:
-        df = pd.read_excel(file_source, sheet_name=0, engine="openpyxl")
+        # Read the file based on its extension
+        if file_extension == "csv":
+            try:
+                df = pd.read_csv(file_source, encoding="utf-8")
+            except UnicodeDecodeError:
+                file_source.seek(0)  # Reset stream
+                df = pd.read_csv(file_source, encoding="latin-1")
+        elif file_extension in {"xlsx", "xls"}:
+            df = pd.read_excel(file_source, sheet_name=0, engine="openpyxl")
+        else:
+            raise ValueError(f"Unsupported file extension: {file_extension}")
+
+        # df = pd.read_excel(file_source, sheet_name=0, engine="openpyxl")
         df = df.dropna(how="all")
         nan_count = df.isna().sum().sum()
         df = df.where(df.notna(), None)
@@ -491,7 +501,6 @@ def process_excel_report_to_jsonb(
             report_metadata[report_key] = {
                 "last_updated": datetime.datetime.utcnow().isoformat() + "Z"
             }
-            print(report_metadata)
             update_company_jsonb(company_id, company_data, data_schema,report_metadata)
             column_names = df.columns.tolist()
             update_column_descriptions(company_id,report_key,column_names)
@@ -607,10 +616,10 @@ def handle_excel_upload_request(
             "status": "error",
             "message": f"Invalid 'report_name' provided: {report_name_original}",
         }, 400
-
+    file_extension = excel_file_storage.filename.rsplit(".", 1)[1].lower() if "." in excel_file_storage.filename else None
     logger.info(
         f"Handler: Received request for company_id: {company_id}, report_name: '{report_name_original}' (sanitized to "
-        f"'{report_key}'), file: {excel_file_storage.filename}"
+        f"'{report_key}'), file: {excel_file_storage.filename}, extension: {file_extension}"
     )
 
     file_content_stream = None
@@ -622,6 +631,7 @@ def handle_excel_upload_request(
             report_key=report_key,
             file_source=file_content_stream,
             company_id=company_id,
+            file_extension=file_extension
         )
 
         if result_data.get("status") == "success":

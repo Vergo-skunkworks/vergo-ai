@@ -217,6 +217,110 @@ def get_company_data_schema(company_id: int) -> str:
     # Return "{}" only if schema was explicitly empty, otherwise return the JSON string or error
     return schema_json if schema_json != "{}" else "{}"
 
+def get_company_column_rules(company_id: int) -> str:
+    """
+    Retrieves the 'rules' plain TEXT content for a specific company from the 'company_data' table.
+    """
+    logger.debug(f"Retrieving column rules (TEXT) for company_id: {company_id}")
+    query = text("SELECT rules FROM company_data WHERE company_id = :company_id LIMIT 1")
+    rules_text = ""
+
+    try:
+        with get_db_connection() as (conn, engine):
+            result = conn.execute(query, {"company_id": company_id}).fetchone()
+
+            if result and result[0]:
+                rules_text = str(result[0]).strip()
+                if not rules_text:
+                    logger.warning(f"Rules column is present but empty for company_id: {company_id}")
+            else:
+                logger.warning(f"No rules found for company_id: {company_id}")
+                return "Error: No rules found for company_id"
+    except Exception as e:
+        logger.error(f"❌ Error retrieving rules for company_id {company_id}: {e}", exc_info=True)
+        return f"Error: Failed to retrieve rules: {e}"
+
+    return rules_text
+
+
+
+def get_company_column_description(company_id: int) -> str:
+    """
+    Retrieves the 'column_description' JSONB content for a specific company
+    from the 'company_data' table.
+
+    Args:
+        company_id: The identifier for the company whose schema is needed.
+
+    Returns:
+        A JSON string representing the schema stored in the 'description' column,
+        or an error message string starting with "Error:", or "{}" if not found/empty.
+    """
+    logger.debug(f"Retrieving column descriptions for company_id: {company_id}")
+    # Ensure company_id is treated as an integer in the query parameter
+    query = text(
+        "SELECT description FROM company_data WHERE company_id = :company_id LIMIT 1"
+    )
+    description_json = "{}"  # Default to empty JSON string
+
+    try:
+        with get_db_connection() as (conn, engine):
+            # Execute query with parameter binding
+            result = conn.execute(
+                query, {"company_id": company_id}
+            ).fetchone()
+
+            if result and result[0]:
+                # The database driver (psycopg2) usually converts JSONB to Python dict/list automatically
+                description_data = result[0]
+                if (
+                        isinstance(description_data, (dict, list)) and description_data
+                ):  # Check if it's a non-empty dict/list
+                    description_json = json.dumps(description_data, indent=2)
+                    logger.debug(
+                        f"Column Descriptions retrieved successfully for company_id {company_id}."
+                    )
+                elif isinstance(
+                        description_data, str
+                ):  # Handle if it comes back as string unexpectedly
+                    try:
+                        parsed_description = json.loads(description_data)
+                        if parsed_description:
+                            schema_json = json.dumps(parsed_description, indent=2)
+                            logger.debug(
+                                f"Descriptions retrieved (parsed from string) for company_id {company_id}."
+                            )
+                        else:
+                            logger.warning(
+                                f"Empty column description found (after parsing string) for company_id: {company_id}"
+                            )
+                    except json.JSONDecodeError:
+                        logger.error(
+                            f"Invalid JSON string in description for company_id: {company_id}"
+                        )
+                        return f"Error: Invalid JSON found in description for company_id {company_id}"
+                else:
+                    logger.warning(
+                        f"Empty or non-dict/list description found for company_id: {company_id}"
+                    )
+
+            else:
+                logger.warning(
+                    f"No description record found for company_id: {company_id}"
+                )
+                # Decide if this is an error or just means no description available
+                # Returning an error might be safer if description is expected
+                return f"Error: No description found for company_id {company_id}"
+
+    except Exception as e:
+        logger.error(
+            f"❌ Error retrieving description for company_id {company_id}: {e}",
+            exc_info=True,
+        )
+        return f"Error: Failed to retrieve data description: {e}"
+
+    # Return "{}" only if schema was explicitly empty, otherwise return the JSON string or error
+    return description_json if description_json != "{}" else "{}"
 
 def initialize_gemini_model(model_name="gemini-1.5-flash", system_instruction=None):
     """Initializes and configures the Gemini model."""
@@ -412,6 +516,75 @@ def process_prompt(
         )
         logger.info("[✓] Database schema retrieved and validated.")
 
+        # ---- Step 2aa: Get Description ----
+        logger.info("\n📜 STEP 2aa: FETCHING description FROM company_data TABLE")
+        database_description_json_or_error = get_company_column_description(
+            company_id
+        )  # Use the new function
+
+        if database_description_json_or_error.startswith("Error:"):
+            logger.error(f"❌ Description retrieval failed: {database_description_json_or_error}")
+            return [
+                {
+                    "type": "text",
+                    "data": f"Failed to proceed: {database_description_json_or_error}",
+                }
+            ]
+
+        if database_description_json_or_error == "{}":
+            logger.warning(
+                f"Retrieved empty description for company_id {company_id}. Cannot proceed with analysis."
+            )
+            return [
+                {
+                    "type": "text",
+                    "data": f"Failed to proceed: The data description for Company ID {company_id} is empty or could"
+                            f" not be properly retrieved.",
+                }
+            ]
+
+        try:
+            # Validate if it's actually JSON (though get_company_data_schema should ensure this)
+            description_dict = json.loads(database_description_json_or_error)
+            if not description_dict:  # Double check if it's empty after parsing
+                logger.warning(
+                    f"Database description parsed as empty for company ID {company_id}."
+                )
+                return [
+                    {
+                        "type": "text",
+                        "data": f"Failed to proceed: Parsed data description for Company ID {company_id} is empty.",
+                    }
+                ]
+        except json.JSONDecodeError:
+            logger.error(
+                f"❌ Failed to parse the retrieved description JSON: {database_description_json_or_error}"
+            )
+            return [
+                {
+                    "type": "text",
+                    "data": "Failed to proceed: Error parsing database description information.",
+                }
+            ]
+
+        database_description_json = (
+            database_description_json_or_error  # Use the validated JSON string
+        )
+        logger.info("[✓] Database description retrieved and validated.")
+
+        # ---- Step 2ab: Get Rules ----
+        logger.info("\n📜 STEP 2ab: FETCHING rules FROM company_data TABLE")
+        database_rules_text_or_error = get_company_column_rules(company_id)
+
+        if database_rules_text_or_error.startswith("Error:"):
+            logger.warning(f"[!] Rules retrieval warning: {database_rules_text_or_error}")
+        elif not database_rules_text_or_error.strip():
+            logger.info("Rules column is empty.")
+        else:
+            logger.info("[✓] Rules retrieved successfully (plain text).")
+
+        print(database_rules_text_or_error)
+
         # --- Step 2b: Decompose Prompt into Tasks ---
         logger.info("\n🧠 STEP 2b: DECOMPOSING PROMPT INTO TASKS (using JSON schema)")
 
@@ -432,9 +605,16 @@ def process_prompt(
                                     'data' JSONB column, each holding 
                                     an array of JSON objects.
                                     
+                                    The Description about columns of this 'data' column for the relevant company is described by the 
+                                    'Description'. It's jsonb format where top key have description about it's columns
+                                    
                                     Data Schema (Structure within the 'data' JSONB column of 'company_data' for 
                                     company_id={company_id}):
                                     {database_schema_json}
+                                    
+                                    Description about columns (Description of columns  within the 'data' JSONB column of 'company_data' for 
+                                    company_id={company_id}):
+                                    {database_description_json}                                    
                                     
                                     **Guidelines for Defining Tasks:**
                                     
@@ -593,147 +773,149 @@ def process_prompt(
         insight_gemini = None
         title_gemini = None
 
-        sql_instruction = f"""You are an expert PostgreSQL query writer specializing in querying JSONB data. Your task is to generate a single, syntactically correct PostgreSQL SELECT query to retrieve data based on the provided task and schema. You must strictly follow all rules to ensure correctness and generality for any company-uploaded data schema.
-
-            Data Source
-            Table: All data comes from a single table named company_data.
-            Columns:
-            company_id (INT): Unique identifier for the company.
-            data (JSONB): Contains all company-uploaded file data.
-            Mandatory Filter: Every query must include WHERE company_id = :company_id in each Common Table Expression (CTE) that accesses the company_data table. The placeholders :company_id and :to_date will be provided in the task details.
-            JSONB Schema
-            Structure: The JSONB data column’s structure is provided as {database_schema_json}.
-            Content: The data column contains top-level keys (e.g., records, details) that map to arrays of JSON objects.
-            Fields: Each object includes fields, such as an identifier field (e.g., id) for joining or grouping, as specified in the task.
-            Example Schema:
-            json
-            [
-            "records": [
-                ("id": "101", "name": "John", "value1": "1000.0", "value2": "800.0"),
-                ("id": "102", "name": "Jane", "value1": "0.0", "value2": "0.0")
-            ],
-            "details": [
-                ("id": "101", "category": "A", "amount": "50.0")
-            ]
-            ]
-            Querying JSONB Data
-            Unnesting Arrays:
-                Mandatory: Always use Common Table Expressions (CTEs) to unnest JSONB arrays.
-                Prohibited: Direct unnesting in the main query or subqueries is not allowed.
-                Pattern: For each JSONB array accessed (e.g., data -> 'records'), create a dedicated CTE:
-                sql
-                WITH records_data AS (
-                SELECT company_id, jsonb_array_elements(data -> 'records') AS elem
-                FROM company_data
-                WHERE company_id = :company_id
-                )
-                Multiple CTEs: Chain multiple CTEs with commas (e.g., WITH records_data AS (...), details_data AS (...)).
-                Naming: Use descriptive CTE names based on the array key (e.g., records_data for data -> 'records').
-                Accessing Fields:
-                Use the ->> operator to extract fields from the unnested element alias (e.g., elem ->> 'name').
-                Assign clear aliases in the final SELECT (e.g., elem ->> 'name' AS name).
-                Casting:
-            Identifier Fields or Counts:
-                Preferred Method: Cast to FLOAT first, then to INTEGER to handle decimals (e.g., "123.0"): (elem ->> 'id')::FLOAT::INTEGER AS id.
-                Alternative: Use direct (elem ->> 'id')::INTEGER only if the task confirms the field is always a clean integer string (e.g., "123").
-                Numeric Fields: Cast to FLOAT for amounts (e.g., (elem ->> 'value1')::FLOAT).
-                Date Fields: Cast to DATE (e.g., (elem ->> 'date')::DATE).
-                Requirement: Apply casts before comparisons, joins, or aggregations.
-                Division by Zero:
-                Use NULLIF(denominator, 0) for safe division: (elem ->> 'value1')::FLOAT / NULLIF((elem ->> 'value2')::FLOAT, 0).
-            Filtering:
-                Apply WHERE conditions after extracting and casting fields (e.g., WHERE (elem ->> 'id')::FLOAT::INTEGER = 123).
-                Mandatory: Include IS NOT NULL checks for fields in the final SELECT, WHERE, or ORDER BY clauses (e.g., WHERE (elem ->> 'name') IS NOT NULL).
-                Combine IS NOT NULL conditions with AND.
-                For TEXT fields, consider AND (elem ->> 'field') <> '' if empty strings are invalid.
-                For numeric fields, consider AND (elem ->> 'field')::FLOAT <> 0 if the task excludes zero values.
-            Joining Arrays:
-                For prompts requiring data from multiple arrays (e.g., joining records and details):
-                Create separate CTEs for each array (e.g., records_data, details_data).
-                Use standard SQL JOIN (INNER or LEFT, based on task requirements).
-                Join on extracted and casted identifier fields: (records_data.elem ->> 'id')::FLOAT::INTEGER = (details_data.elem ->> 'id')::FLOAT::INTEGER.
-                Use LEFT JOIN only if the task requires including rows with missing matches; otherwise, prefer INNER JOIN to avoid duplicate rows.
-                Do not use Full outer join. Strictly follow it as can cause syntax error
-            Aggregation:
-                Use standard SQL aggregates (SUM, AVG, COUNT, etc.) on casted fields.
-                For aggregation tasks, create a CTE to compute aggregates:
-                sql
-                WITH records_agg AS (
-                SELECT (elem ->> 'id')::FLOAT::INTEGER AS id,
-                        SUM((elem ->> 'value1')::FLOAT) AS total_value
-                FROM company_data,
-                    jsonb_array_elements(data -> 'records') AS elem
-                WHERE company_id = :company_id
-                GROUP BY (elem ->> 'id')::FLOAT::INTEGER
-                )
-                Use final SELECT aliases in GROUP BY and ORDER BY clauses (e.g., GROUP BY name).
-            NULL Handling:
-                Ensure every field in the final SELECT has a corresponding IS NOT NULL condition in the WHERE clause.
-                Use COALESCE(field, 0) for numeric fields to replace NULLs with 0 in aggregations.
-                For percentage calculations:
-                Formula: (value / NULLIF(denominator, 0)) * 100.
-                Replace negative results with 0: GREATEST(value, 0).
-                Ensure non-NULL results: COALESCE((GREATEST(value, 0) / NULLIF(denominator, 0)) * 100, 0).
-                Total Row:
-                Compute totals for numeric columns using SUM and for average columns using AVG.
-                Store the main report in a CTE named report_data and UNION with a totals row:
-                sql
-                WITH report_data AS (...),
-                    totals AS (
-                    SELECT 'Total' AS name,
-                            SUM(numeric_column) AS numeric_column,
-                            AVG(avg_column) AS avg_column
-                    FROM report_data
-                    )
-                SELECT * FROM report_data
-                UNION ALL
-                SELECT * FROM totals
-                Row Exclusion:
-                Exclude rows where all numeric columns are 0. Keep rows if any numeric column has a non-zero value.
-                Implement in the report_data CTE using a WHERE condition:
-                sql
-                WHERE numeric_column1 <> 0 OR numeric_column2 <> 0
-                Column Naming:
-                Use clear, human-readable aliases (e.g., Total Value, not total_value or Sum Value).
-                For sums, use the field name directly (e.g., Value1, not Sum Value1).
-                For averages, prefix with Avg (e.g., Avg Value).
-                Exclude identifier fields (e.g., id) from the final SELECT unless explicitly requested.
-                Profit Calculations (if specified in the task):
-                Gross profit: value1 - value2 (or equivalent fields specified in the task).
-                Gross profit percentage: COALESCE((GREATEST(value1 - value2, 0) / NULLIF(value1, 0)) * 100, 0).
-            Query Structure Checklist
-                The query must follow this structure:
-        
-                Start with a WITH clause defining CTEs for unnesting arrays.
-                Each CTE must include WHERE company_id = :company_id.
-                Use INNER JOIN unless LEFT JOIN is explicitly required.
-                Apply IS NOT NULL for all selected fields and fields used in WHERE or ORDER BY.
-                Use COALESCE and NULLIF for safe calculations.
-                Store report in a report_data CTE and UNION with a totals row.
-                Exclude rows where all numeric columns are 0.
-                Use final SELECT aliases in GROUP BY and ORDER BY.
-                Do not use column aliases in WHERE clauses (e.g., WHERE "Total Value" IS NOT NULL is invalid).
-                Ensure syntactic correctness (e.g., no missing commas, correct parentheses).
-                Do not include ORDER BY in the final query to keep the total row at the end.
-                Fetch all required data; do not assume NULL or 0 values unless specified.
-                Include identifier fields in CTEs for joins but exclude from final SELECT unless requested.
-            Task Details
-                Task Description: {{{{TASK_DESCRIPTION_PLACEHOLDER}}}}
-                Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
-                Company ID for Query: {{{{COMPANY_ID_PLACEHOLDER}}}}
-                Parameters: Use :company_id and :to_date in the query.
-                Output Format
-                Output a raw PostgreSQL query only.
-                Must include placeholders :company_id for filtering the company_data table within CTEs.
-                Do not include comments, explanations, or markdown (e.g., ```sql).
-                All queries must begin with a WITH clause defining CTEs for unnesting arrays.
-                Verify syntax before outputting (e.g., check for missing commas, correct CTE structure)."""
+        sql_instruction = f"""You are an expert PostgreSQL query writer specializing in JSONB data. Your task is to generate a single, syntactically correct PostgreSQL `SELECT` query based on the provided task and schema.
+                                
+                                **Strictly adhere to all rules below.**
+                                
+                                ### **Data Source**
+                                * **Table:** `company_data`
+                                * **Columns:**
+                                    * `company_id` (INT): Unique identifier.
+                                    * `data` (JSONB): Contains all uploaded file data.
+                                * **Mandatory Filter:** Every CTE accessing `company_data` **must** include `WHERE company_id = :company_id`. The placeholders `:company_id` will be provided.
+                                
+                                ### **JSONB Schema**
+                                * **Structure:** The `data` column's structure is provided as `{database_schema_json}`. It contains top-level keys (e.g., `records`, `details`) that map to arrays of JSON objects.
+                                * **Fields:** Each object includes an identifier field (e.g., `id`) for joining or grouping, as specified in the task.
+                                * **Example Schema:**
+                                    ```json
+                                    (
+                                        "records": [
+                                            ("id": "101", "name": "John", "value1": "1000.0", "value2": "800.0"),
+                                            ("id": "102", "name": "Jane", "value1": "0.0", "value2": "0.0")
+                                        ],
+                                        "details": [
+                                            ("id": "101", "category": "A", "amount": "50.0")
+                                        ]
+                                    )
+                                    ```
+                                * **Descriptions:** `{database_description_json}` provides column descriptions. Use this to correctly analyze the task. (May be empty.)
+                                * **Business Rules:** `{database_rules_text_or_error}` specifies mandatory business rules. (May be empty.)
+                                
+                                ### **Querying JSONB Data**
+                                
+                                1.  **Unnesting Arrays:**
+                                    * **Always use CTEs.** Direct unnesting in the main query or subqueries is forbidden.
+                                    * **Pattern:** For each JSONB array (e.g., `data -> 'records'`), create a dedicated CTE:
+                                        ```sql
+                                        WITH records_data AS (
+                                            SELECT company_id, jsonb_array_elements(data -> 'records') AS elem
+                                            FROM company_data
+                                            WHERE company_id = :company_id
+                                        )
+                                        ```
+                                    * **Multiple CTEs:** Chain with commas (e.g., `WITH records_data AS (...), details_data AS (...)`).
+                                    * **Naming:** Use descriptive CTE names based on the array key (e.g., `records_data`).
+                                
+                                2.  **Accessing Fields:**
+                                    * Use `->>` to extract fields from the unnested `elem` alias (e.g., `elem ->> 'name'`).
+                                    * Assign clear aliases in the final `SELECT` (e.g., `elem ->> 'name' AS name`).
+                                
+                                3.  **Casting:**
+                                    * **Identifiers/Counts:** `(elem ->> 'id')::FLOAT::INTEGER AS id` (preferred for "123.0"). Use `(elem ->> 'id')::INTEGER` only if always a clean integer string.
+                                    * **Numeric Fields:** Cast to `FLOAT` (e.g., `(elem ->> 'value1')::FLOAT`).
+                                    * **Date Fields:** Cast to `DATE` (e.g., `(elem ->> 'date')::DATE`).
+                                    * **Requirement:** Apply casts *before* comparisons, joins, or aggregations.
+                                
+                                4.  **Division by Zero:**
+                                    * Use `NULLIF(denominator, 0)` for safe division: `(elem ->> 'value1')::FLOAT / NULLIF((elem ->> 'value2')::FLOAT, 0)`.
+                                
+                                5.  **Joining Arrays:**
+                                    * Create separate CTEs for each array (e.g., `records_data`, `details_data`).
+                                    * Use standard SQL `JOIN` (`INNER` by default, `LEFT` if explicitly required for missing matches).
+                                    * Join on extracted and casted identifier fields: `(records_data.elem ->> 'id')::FLOAT::INTEGER = (details_data.elem ->> 'id')::FLOAT::INTEGER`.
+                                    * **Prohibited:** Do not use `FULL OUTER JOIN`.
+                                
+                                6.  **Aggregation:**
+                                    * Use standard SQL aggregates (`SUM`, `AVG`, `COUNT`, etc.) on casted fields.
+                                    * For aggregation tasks, create a CTE to compute aggregates:
+                                        Example:
+                                            WITH records_agg AS (
+                                                SELECT
+                                                    (elem ->> 'id')::FLOAT::INTEGER AS id,
+                                                    SUM((elem ->> 'value1')::FLOAT) AS total_value
+                                                FROM company_data,
+                                                    jsonb_array_elements(data -> 'records') AS elem
+                                                WHERE company_id = :company_id
+                                                GROUP BY (elem ->> 'id')::FLOAT::INTEGER
+                                            )
+                                    * Use final `SELECT` aliases in `GROUP BY` and `ORDER BY` clauses.
+                                
+                                7.  **NULL Handling:**
+                                    * Use `COALESCE(field, 0)` for numeric fields to replace `NULL`s with `0` in aggregations.
+                                    * **Percentage Calculations:**
+                                        * Formula: `(value / NULLIF(denominator, 0)) * 100`.
+                                        * Ensure non-`NULL` results: `COALESCE((GREATEST(value, 0) / NULLIF(denominator, 0)) * 100, 0)`.
+                                
+                                8.  **Total Row (If Requested):**
+                                    * Compute totals for numeric columns (using `SUM`) and averages (using `AVG`).
+                                    * Store the main report in a CTE named `report_data`.
+                                    * `UNION ALL` with a `totals` CTE:
+                                        Example:
+                                            WITH report_data AS (...),
+                                            totals AS (
+                                                SELECT
+                                                    'Total' AS name,
+                                                    SUM(numeric_column) AS numeric_column,
+                                                    AVG(avg_column) AS avg_column
+                                                FROM report_data
+                                            )
+                                            SELECT * FROM report_data
+                                            UNION ALL
+                                            SELECT * FROM totals
+                                
+                                9.  **Column Naming:**
+                                    * Use clear, human-readable aliases (e.g., `Total Value`).
+                                    * For sums, use the field name directly (e.g., `Value1`).
+                                    * For averages, prefix with `Avg` (e.g., `Avg Value`).
+                                    * Exclude identifier fields (e.g., `id`) from the final `SELECT` unless explicitly requested.
+                                
+                                10. **Profit Calculations (If Specified):**
+                                    * **Gross Profit:** `value1 - value2` (or specified fields).
+                                    * **Gross Profit Percentage:** `COALESCE((GREATEST(value1 - value2, 0) / NULLIF(value1, 0)) * 100, 0)`.
+                                
+                                ### **Query Structure Checklist**
+                                
+                                * Starts with a `WITH` clause defining CTEs for unnesting.
+                                * Each CTE includes `WHERE company_id = :company_id`.
+                                * Uses `INNER JOIN` by default, `LEFT JOIN` only when required.
+                                * Employs `COALESCE` and `NULLIF` for safe calculations.
+                                * Stores report in `report_data` CTE and `UNION`s with a total row (if requested).
+                                * Syntactically correct (no missing commas, correct parentheses, valid CTE structure).
+                                * **Prohibited:** Do not use column aliases in `WHERE` clauses.
+                                * **Prohibited:** Do not include `ORDER BY` in the final query if a total row is added.
+                                * Fetches all required data; does not assume `NULL` or `0` values unless specified.
+                                * Includes identifier fields in CTEs for joins but excludes from final `SELECT` unless requested.
+                                
+                                ### **Task Details**
+                                * **Task Description:** `{{{{TASK_DESCRIPTION_PLACEHOLDER}}}}`
+                                * **Required Data Summary:** `{{{{REQUIRED_DATA_PLACEHOLDER}}}}`
+                                * **Company ID:** `{{{{COMPANY_ID_PLACEHOLDER}}}}`
+                                * **Parameters:** Use `:company_id` and `:to_date` in the query.
+                                
+                                ### **Output Format**
+                                * Output **only** the raw PostgreSQL query.
+                                * **No comments, explanations, or markdown (e.g., ```sql).**
+                                * The query must begin with a `WITH` clause.
+                                * Verify syntax before outputting.
+                                
+                                ---"""
         # --- *** End Modified SQL Instruction *** ---
 
         try:
             # Initialize SQL model with the new system instruction
             sql_gemini = initialize_gemini_model(
-                system_instruction=sql_instruction, model_name="gemini-1.5-pro"
+                system_instruction=sql_instruction, model_name="gemini-2.5-pro-preview-06-05"
             )  # Or a more powerful model if needed
             logger.debug("SQL Gemini model initialized for JSONB querying.")
         except Exception as model_init_error:
@@ -789,8 +971,8 @@ def process_prompt(
                     f"Task Description: {task_description}\n"
                     f"Required Data Summary: {required_data}\n"
                     f"Company ID for Query: {company_id}\n"  # Inject the actual company_id
-                    f"Generate the PostgreSQL query using ONLY the provided schema and adhering strictly to the JSONB "
-                    f"querying rules, including the :company_id and :to_date parameter and correct field access in "
+                    f"Generate the PostgreSQL query using ONLY the provided schema, column Descriptions, rules and adhering strictly to the JSONB "
+                    f"querying rules, including the :company_id parameter and correct field access in "
                     f"SELECT/GROUP "
                     f"BY/ORDER BY."
                 )  # Added reminder
