@@ -59,16 +59,16 @@ def get_db_connection():
 
     # For Cloud SQL Connector using Unix domain sockets
     # Format: postgresql+psycopg2://user:password@/dbname?host=/cloudsql/instance_connection_name
-    conn_string = (
-        f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-        f"?host=35.190.189.103"
-    )
-
-    # Alternative format (both should work):
     # conn_string = (
     #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-    #     f"?host=/cloudsql/{instance_connection_name}"
+    #     f"?host=35.190.189.103"
     # )
+
+    # Alternative format (both should work):
+    conn_string = (
+        f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+        f"?host=/cloudsql/{instance_connection_name}"
+    )
     # conn_string = (
     #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
     #     f"?host=/cloudsql/{instance_connection_name}"

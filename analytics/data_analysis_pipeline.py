@@ -60,18 +60,18 @@ def get_db_connection():
     #     f"?host=/cloudsql/{instance_connection_name}"
     # )
 
-    conn_string = (
-        f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-        f"?host=35.190.189.103"
-    )
+    # conn_string = (
+    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+    #     f"?host=35.190.189.103"
+    # )
 
     # conn_string = f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@{db_host}:{db_port}/{db_name}"
 
     # Alternative format (both should work):
-    # conn_string = (
-    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-    #     f"?host=/cloudsql/{instance_connection_name}"
-    # )
+    conn_string = (
+        f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+        f"?host=/cloudsql/{instance_connection_name}"
+    )
 
     engine = None
     conn = None
