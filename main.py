@@ -115,6 +115,7 @@ def query_pipeline():
     prompt = data.get("prompt")
     company_id = data.get("company_id")
     # to_date = data.get("to_date")
+    promptId = data.get("promptId")
 
     if not prompt:
         logger.warning("Missing prompt in request")
@@ -127,8 +128,13 @@ def query_pipeline():
         # to_date = datetime.datetime.strptime(to_date, "%Y-%m-%d").date()
         logger.info(f"Processing prompt: {prompt[:100]}...")
         result = process_prompt(prompt, company_id)
+        print(result)
         logger.info("Successfully processed prompt via /api/query")
-        return jsonify({"response": result}), 200
+        return jsonify({"response": {
+            "promptId" : promptId,
+            "results": result
+        }}), 200
+
     except ValueError as ve:
         logger.error(f"Configuration error processing prompt: {str(ve)}", exc_info=True)
         return jsonify({"error": f"Configuration error: {str(ve)}"}), 500
