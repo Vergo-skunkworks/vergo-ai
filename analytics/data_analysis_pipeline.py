@@ -491,6 +491,15 @@ def process_prompt(
             }
         ]
     logger.info(f"Target Company ID: {company_id}")
+    response = {
+        "type": "text",
+        "data": prompt,
+    }
+    insert_message_into_db({
+        "chat_id": chat_id,
+        "sender": "User",
+        "result": json.dumps(response)
+    })
 
     results = []
 
@@ -1310,6 +1319,11 @@ def process_prompt(
                         logger.info(f"    [✓] Visualization ({viz_type}) generated")
                         response = {"type": "graph", "data": plotly_json}
                         results.append(response)
+                        insert_message_into_db({
+                            "chat_id": chat_id,
+                            "sender": "System",
+                            "result": json.dumps(response)
+                        })
                     except (json.JSONDecodeError, ValueError) as e:
                         logger.error(
                             f"    [✗] Failed to parse or validate Plotly JSON: {e}",
@@ -1318,13 +1332,13 @@ def process_prompt(
                         logger.error(
                             f"    Problematic Plotly JSON text: {plotly_json_text}"
                         )
-                        response =                             {
+                        response = {
                                 "type": "text",
                                 "data": f"Error generating visualization for '{task_description}': Invalid Plotly "
                                         f"configuration received from AI. Details: {e}",
                             }
                         results.append(
-
+                            response
                         )
                         insert_message_into_db({
                             "chat_id": chat_id,
