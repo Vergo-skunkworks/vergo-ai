@@ -48,9 +48,15 @@ def get_db_connection():
     # Use the public IP for Cloud SQL if needed, or Unix socket path
     # For Unix socket, host=/cloudsql/instance_connection_name
     # For public IP, host=35.190.189.103 (or your actual public IP)
+    # conn_string = (
+    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+    #     f"?host=35.190.189.103" # Replace with your actual Cloud SQL public IP or unix socket path
+    # )
+
+    # Alternative format (both should work):
     conn_string = (
         f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-        f"?host=35.190.189.103" # Replace with your actual Cloud SQL public IP or unix socket path
+        f"?host=/cloudsql/{instance_connection_name}"
     )
 
     engine = None

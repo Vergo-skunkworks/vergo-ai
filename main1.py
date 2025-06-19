@@ -2,7 +2,7 @@ import logging
 import os
 import datetime
 from flask import Flask, request, jsonify, current_app
-from analytics.data_analysis_pipeline import process_prompt
+from analytics.upgradedAnalysis import process_prompt
 from dotenv import load_dotenv
 import uuid
 
@@ -119,8 +119,8 @@ def query_pipeline():
     data = request.get_json()
     prompt = data.get("prompt")
     company_id = data.get("company_id")
-    promptId = data.get("promptId")
-    chat_id = data.get("chat_id");
+    chat_id = data.get("chat_id")
+    selected_categories = data.get("selected_categories")
 
     if not prompt:
         logger.warning("Missing prompt in request")
@@ -136,11 +136,10 @@ def query_pipeline():
         # The process_prompt function in analytics.data_analysis_pipeline.py
         # will now need to query the new relational tables (files, file_data, file_schemas)
         # to get the data and schema context for the LLM.
-        result = process_prompt(prompt, company_id, chat_id)
+        result = process_prompt(prompt, company_id, chat_id, selected_categories)
         print(result) # Consider using logger.info instead of print for production
         logger.info("Successfully processed prompt via /api/query")
         return jsonify({"response": {
-            "promptId" : promptId,
             "results": result
         }}), 200
 
@@ -161,4 +160,4 @@ def health_check():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    app.run(debug=False, host="0.0.0.0", port=port)
+    app.run(debug=True, host="0.0.0.0", port=port)
