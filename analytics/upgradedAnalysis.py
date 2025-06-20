@@ -16,6 +16,7 @@ import base64
 import openpyxl
 from openpyxl.styles import Font, Alignment
 from openpyxl.utils import get_column_letter
+from typing import List, Dict, Any
 
 # Ensure this is loaded at the very beginning
 load_dotenv()
@@ -51,7 +52,7 @@ def get_db_connection():
     #     f"?host={db_host}"
     # )
 
-    # Alternative format (both should work):
+    # # Alternative format (both should work):
     conn_string = (
         f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
         f"?host=/cloudsql/{instance_connection_name}"
@@ -367,6 +368,7 @@ def get_distinct_categories(company_id: int) -> List[str]:
         logger.error(f"❌ Error fetching distinct categories: {e}", exc_info=True)
         raise
 
+
 def get_messages_from_db(chat_id: str) -> List[Dict[str, Any]]:
     """Retrieves all messages for a given chat_id from the 'messages' table."""
     query = """
@@ -378,42 +380,33 @@ def get_messages_from_db(chat_id: str) -> List[Dict[str, Any]]:
     params = {"chat_id": chat_id}
     with get_db_connection() as (conn, engine):
         result = conn.execute(text(query), params).fetchall()
+        # Convert row._mapping to dict explicitly to ensure JSONB fields are handled correctly.
+        # Psycopg2 should handle JSONB -> dict automatically, but good to be aware.
         return [dict(row._mapping) for row in result]
 
 
 def format_chat_history_for_gemini(chat_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Formats a list of database chat messages into a history list suitable for Gemini's ChatSession.
-    Only includes messages from previous turns. The current user message is handled separately.
+    For Gemini API, 'parts' should be a list of Content objects (often just strings).
     """
     gemini_history = []
-    # Loop through messages excluding the very last one (which is the current user prompt)
-    # The current user prompt is handled by send_message directly.
-    # This also means the *first* message in history might be the previous LLM response if the conversation starts with LLM.
-    # Adjust this logic if the very first message is always a user message.
-
-    # We should retrieve all messages *before* the current user message gets inserted.
-    # However, since the user message is inserted immediately in process_prompt,
-    # we need to filter it out or ensure we only pass "previous" messages.
-    # A cleaner way is to fetch history, then add the current user prompt as the *last* turn.
 
     for msg in chat_messages:
         role = "user" if msg["sender"].lower() == "user" else "model"
 
-        # Determine content for history. For complex types, just use message_text.
-        content_parts = None
-        if msg["message_text"]:
-            content_parts=msg["message_text"]
+        # 'parts' needs to be a list, even for a single text part
+        parts_list = None
+
+        if msg.get("message_text"):
+            parts_list = msg["message_text"]
 
 
-        if content_parts:  # Only add if there's actual content
-            gemini_history.append({"role": role, "parts": content_parts})
+        # Only append a turn if there's actual content to display to the LLM
+        if parts_list:
+            gemini_history.append({"role": role, "parts": parts_list})
 
     return gemini_history
-
-
-from typing import List, Dict, Any
-
 
 def get_category_schemas(
         company_id: int,
@@ -491,6 +484,9 @@ def process_prompt(
 
     logger.info(f"Target Company ID: {company_id}")
 
+    message_history = get_messages_from_db(chat_id)
+    formated_message_history = format_chat_history_for_gemini(message_history)
+
     response = {
         "type": "text",
         "data": prompt,
@@ -512,7 +508,7 @@ def process_prompt(
             logger.warning(error_msg)
             llm_response_data = {"type": "text", "data": error_msg}
             results.append(llm_response_data)
-            insert_message_into_db({"result": llm_response_data, "chat_id": chat_id, "sender": "System"})
+            insert_message_into_db({"result": "You have not define correct data sources.", "chat_id": chat_id, "sender": "System"})
             return results
 
         logger.info(f"[✓] Retrieved schemas for {len(category_schemas_map)} categories.")
@@ -656,7 +652,7 @@ def process_prompt(
         # --- End Decomposition Instruction ---
 
         decomposer_model = initialize_gemini_model()
-        decomposer_chat = decomposer_model.start_chat()
+        decomposer_chat = decomposer_model.start_chat(history=formated_message_history)
         response = decomposer_chat.send_message(decomposition_instruction)
         cleaned_response = clean_response_text(response.text)
         logger.debug(f"Raw task decomposition response: {response.text}")
@@ -800,6 +796,7 @@ def process_prompt(
                                 * Syntactically correct.
                                 * Fetches all required data; does not assume `NULL` or `0` values unless specified.
                                 * **Prohibited:** No column aliases in `WHERE`. No `ORDER BY` in final query if `UNION ALL` with total row.
+                                * Do not add extra column in reports etc. just fetch required columns.
                                 
                                 ### **Column Naming:**
                                     * Use clear, human-readable aliases (e.g., `Total Value`).
@@ -846,7 +843,7 @@ def process_prompt(
             if not task_type or not required_data:
                 logger.warning(f"  [!] Skipping task - missing type or data summary")
                 response = {
-                    "type": "text",
+                    "type": "error",
                     "data": f"Skipping sub-task '{task_description}' due to incomplete definition from AI.",
                 }
                 results.append(
@@ -865,7 +862,7 @@ def process_prompt(
                 if sql_gemini is None:  # Should not happen if initialization succeeded
                     logger.error("   [✗] SQL Gemini model not initialized!")
                     response = {
-                        "type": "text",
+                        "type": "error",
                         "data": f"Error processing task '{task_description}': SQL generation component not ready.",
                     }
                     results.append(
@@ -889,7 +886,7 @@ def process_prompt(
                     f"BY/ORDER BY."
                 )  # Added reminder
 
-                sql_chat = sql_gemini.start_chat()
+                sql_chat = sql_gemini.start_chat(history=formated_message_history)
                 sql_response = sql_chat.send_message(sql_prompt)
                 sql_query_text = clean_response_text(sql_response.text)
                 logger.info(
@@ -906,7 +903,7 @@ def process_prompt(
                         f"{sql_query_text}'"
                     )
                     response = {
-                        "type": "text",
+                        "type": "error",
                         "data": f"Could not generate a valid SQL query (must start with SELECT or WITH) for task: "
                                 f"'{task_description}'. AI Output: '{sql_query_text}'",
                     }
@@ -977,7 +974,7 @@ def process_prompt(
                                 exc_info=True,
                             )
                             response = {
-                                "type": "text",
+                                "type": "error",
                                 "data": f"Error processing task '{task_description}': Insight generation "
                                         f"component failed to initialize.",
                             }
@@ -1023,7 +1020,7 @@ def process_prompt(
                             f"    [!] Invalid or missing visualization type '{viz_type}' specified for task."
                         )
                         response = {
-                            "type": "text",
+                            "type": "error",
                             "data": f"Skipping visualization for '{task_description}': Invalid or missing chart"
                                     f" type ('{viz_type}'). Requires 'bar' or 'line'.",
                         }
@@ -1086,7 +1083,7 @@ def process_prompt(
                                 exc_info=True,
                             )
                             response = {
-                                "type": "text",
+                                "type": "error",
                                 "data": f"Error processing task '{task_description}': Visualization generation "
                                         f"component failed to initialize.",
                             }
@@ -1169,7 +1166,7 @@ def process_prompt(
                             f"    Problematic Plotly JSON text: {plotly_json_text}"
                         )
                         response = {
-                            "type": "text",
+                            "type": "error",
                             "data": f"Error generating visualization for '{task_description}': Invalid Plotly "
                                     f"configuration received from AI. Details: {e}",
                         }
@@ -1380,7 +1377,7 @@ def process_prompt(
                         )
                         results.append(
                             {
-                                "type": "text",
+                                "type": "error",
                                 "data": f"Error preparing Excel report for '{task_description}': {report_err}",
                             }
                         )
@@ -1388,7 +1385,7 @@ def process_prompt(
                 else:
                     logger.warning(f"    [!] Unknown task type '{task_type}'")
                     response = {
-                        "type": "text",
+                        "type": "error",
                         "data": f"Unknown task type '{task_type}' encountered for sub-task '{task_description}'. "
                                 f"Cannot process.",
                     }
@@ -1418,7 +1415,7 @@ def process_prompt(
                         exc_info=True,
                     )
                 response = {
-                    "type": "text",
+                    "type": "error",
                     "data": f"An error occurred while processing sub-task '{task_description}': {task_error}",
                 }
                 results.append(
@@ -1439,7 +1436,7 @@ def process_prompt(
         )
         # Append a generic error message to results if appropriate
         response = {
-            "type": "text",
+            "type": "error",
             "data": f"An unexpected error occurred during processing: {e}",
         }
         results.append(
