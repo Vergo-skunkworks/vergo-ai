@@ -47,16 +47,16 @@ def get_db_connection():
 
     db_host = os.environ.get("DB_HOST", "35.190.189.103")
 
-    conn_string = (
-        f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-        f"?host={db_host}"
-    )
-
-    # # Alternative format (both should work):
     # conn_string = (
     #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-    #     f"?host=/cloudsql/{instance_connection_name}"
+    #     f"?host={db_host}"
     # )
+
+    # # Alternative format (both should work):
+    conn_string = (
+        f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+        f"?host=/cloudsql/{instance_connection_name}"
+    )
 
     engine = None
     conn = None
