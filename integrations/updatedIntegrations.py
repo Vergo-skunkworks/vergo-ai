@@ -48,16 +48,16 @@ def get_db_connection():
     # Use the public IP for Cloud SQL if needed, or Unix socket path
     # For Unix socket, host=/cloudsql/instance_connection_name
     # For public IP, host=35.190.189.103 (or your actual public IP)
-    # conn_string = (
-    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-    #     f"?host=35.190.189.103" # Replace with your actual Cloud SQL public IP or unix socket path
-    # )
-
-    # Alternative format (both should work):
     conn_string = (
         f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-        f"?host=/cloudsql/{instance_connection_name}"
+        f"?host=35.190.189.103" # Replace with your actual Cloud SQL public IP or unix socket path
     )
+
+    # Alternative format (both should work):
+    # conn_string = (
+    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+    #     f"?host=/cloudsql/{instance_connection_name}"
+    # )
 
     engine = None
     conn = None
@@ -261,11 +261,12 @@ def insert_file_data(file_id: str, company_id: int, df: pd.DataFrame, inferred_s
 
             if insert_data_rows:
                 conn.execute(
-                    text("INSERT INTO public.file_data (file_id, data, schema) VALUES (:file_id, :data, :schema)"),
+                    text("INSERT INTO public.file_data (file_id, data, schema, description) VALUES (:file_id, :data, :schema, :description)"),
                     {
                         "file_id": file_id,
                         "data": json.dumps(insert_data_rows),
-                        "schema": json.dumps(inferred_schema)
+                        "schema": json.dumps(inferred_schema),
+                        "description": json.dumps({k: "" for k in inferred_schema.keys()})
                     }
                 )
                 logger.info(f"Inserted {len(insert_data_rows)} rows into file_data for file_id {file_id}.")
