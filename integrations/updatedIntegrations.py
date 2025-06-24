@@ -48,16 +48,16 @@ def get_db_connection():
     # Use the public IP for Cloud SQL if needed, or Unix socket path
     # For Unix socket, host=/cloudsql/instance_connection_name
     # For public IP, host=35.190.189.103 (or your actual public IP)
-    # conn_string = (
-    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-    #     f"?host=35.190.189.103" # Replace with your actual Cloud SQL public IP or unix socket path
-    # )
-
-    # Alternative format (both should work):
     conn_string = (
         f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-        f"?host=/cloudsql/{instance_connection_name}"
+        f"?host=35.190.189.103" # Replace with your actual Cloud SQL public IP or unix socket path
     )
+
+    # Alternative format (both should work):
+    # conn_string = (
+    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+    #     f"?host=/cloudsql/{instance_connection_name}"
+    # )
 
     engine = None
     conn = None
@@ -316,7 +316,7 @@ def infer_excel_col_schema(df: pd.DataFrame) -> Dict[str, str]:
     return schema
 
 def process_uploaded_report(
-    excel_file_storage: FileStorage,
+    file_storage: FileStorage,
     company_id: int,
     report_name_original: str, # This will be the logical_file_name
     user_id:int,
@@ -329,12 +329,12 @@ def process_uploaded_report(
     """
     logger.info(f"Processing uploaded report '{report_name_original}' for company_id {company_id}.")
 
-    file_extension = excel_file_storage.filename.rsplit(".", 1)[1].lower() if "." in excel_file_storage.filename else None
+    file_extension = file_storage.filename.rsplit(".", 1)[1].lower() if "." in file_storage.filename else None
     if not file_extension:
         raise ValueError("Could not determine file extension.")
 
     # 1. Store the file content in cloud storage (mock for now)
-    file_content_stream = io.BytesIO(excel_file_storage.read())
+    file_content_stream = io.BytesIO(file_storage.read())
     file_content_stream.seek(0) # Reset stream position
 
 
@@ -389,7 +389,7 @@ def process_uploaded_report(
             df = df.where(df.notna(), None) # Replace NaN values with None for JSON serialization
 
             if df.empty:
-                logger.warning(f"File '{excel_file_storage.filename}' is empty after removing empty rows.")
+                logger.warning(f"File '{file_storage.filename}' is empty after removing empty rows.")
                 num_records = 0
                 inferred_schema = {}
             else:
@@ -439,4 +439,31 @@ def process_uploaded_report(
 
 # Rename this function to reflect its new purpose.
 # It now processes a FileStorage object directly, handles file storage, and database insertions.
-handle_excel_upload_request = process_uploaded_report
+# handle_excel_upload_request = process_uploaded_report
+
+def process_multiple_uploaded_reports(
+    files: List[FileStorage],
+    company_id: int,
+    user_id: int,
+    category_name: Union[str, None] = None
+) -> Tuple[List[Dict[str, Any]], int]:
+    """
+    Processes multiple uploaded files and returns their processing results.
+    """
+    results = []
+    for file in files:
+        if file and allowed_file(file.filename):
+            result, status_code = process_uploaded_report(
+                file_storage=file,
+                company_id=company_id,
+                report_name_original=file.filename,
+                user_id=user_id,
+                category_name=category_name
+            )
+            results.append(result)
+        else:
+            results.append({
+                "status": "error",
+                "message": f"Unsupported or missing file: {file.filename if file else 'Unknown'}"
+            })
+    return results, 200

@@ -47,16 +47,16 @@ def get_db_connection():
 
     db_host = os.environ.get("DB_HOST", "35.190.189.103")
 
-    # conn_string = (
-    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-    #     f"?host={db_host}"
-    # )
-
-    # # Alternative format (both should work):
     conn_string = (
         f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-        f"?host=/cloudsql/{instance_connection_name}"
+        f"?host={db_host}"
     )
+
+    # # Alternative format (both should work):
+    # conn_string = (
+    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+    #     f"?host=/cloudsql/{instance_connection_name}"
+    # )
 
     engine = None
     conn = None
@@ -508,7 +508,8 @@ def process_prompt(
             logger.warning(error_msg)
             llm_response_data = {"type": "text", "data": error_msg}
             results.append(llm_response_data)
-            insert_message_into_db({"result": "You have not define correct data sources.", "chat_id": chat_id, "sender": "System"})
+            response = {"type": "text", "data": "You have not define correct data sources."}
+            insert_message_into_db({"result": json.dumps(response), "chat_id": chat_id, "sender": "System"})
             return results
 
         logger.info(f"[✓] Retrieved schemas for {len(category_schemas_map)} categories.")
