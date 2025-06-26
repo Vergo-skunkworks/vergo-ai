@@ -227,22 +227,47 @@ def get_file_schema_definition(file_id: str) -> Dict[str, Any]:
             logger.error(f"❌ Error fetching schema for file_id {file_id}: {e}", exc_info=True)
             raise
 
-def insert_file_data(file_id: str, company_id: int, df: pd.DataFrame, inferred_schema: Dict[str, str]):
+def insert_file_data(file_id: str, company_id: int, df: pd.DataFrame, inferred_schema: Dict[str, str], category:  str):
     """
     Inserts processed DataFrame rows into file_data and the schema into file_schemas.
     Handles replacing older versions' data if a new version is uploaded.
     """
     with get_db_connection() as (conn, engine):
         try:
-            # Delete existing data for this file_id (if re-processing or replacing a specific file)
-            # Or, if this is a new version of a logical_file, the old data might be kept
-            # but usually for analysis, we only want the data of the *latest* file_id
-            # If the strategy is "replace ALL data for a logical_file_name on new upload",
-            # this logic needs to be more complex, finding old file_ids and deleting their data.
-            # For now, we assume file_id uniquely identifies a specific upload.
-            delete_existing_data_sql = text("DELETE FROM public.file_data WHERE file_id = :file_id")
-            conn.execute(delete_existing_data_sql, {"file_id": file_id})
-            logger.info(f"Deleted existing data for file_id {file_id} before re-insertion.")
+            logger.info("Fetching previous schema for category store in database if available.")
+            query = text(
+                """
+                SELECT description
+                FROM public.file_data fd join files f on f.file_id = fd.file_id
+                WHERE company_id = :company_id
+                  AND category_name = :category
+                ORDER BY fd.created_at DESC 
+                    LIMIT 1
+                """
+            )
+
+            result = conn.execute(
+                query, {"company_id": company_id, "category": category}
+            ).fetchone()
+            prev_description = {}
+            if result and result[0]:
+                # Check if result[0] is already a dict
+                if isinstance(result[0], dict):
+                    prev_description = result[0]
+                else:
+                    try:
+                        prev_description = json.loads(result[0])
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "Previous description for %s/%s could not be decoded – "
+                            "ignoring it.", company_id, category
+                        )
+
+            description_for_insert = {
+                col: prev_description.get(col, "") for col in inferred_schema.keys()
+            }
+
+            logger.info("Description will be inserted:", description_for_insert)
 
             # Insert data rows
             records = df.to_dict(orient="records")
@@ -266,7 +291,7 @@ def insert_file_data(file_id: str, company_id: int, df: pd.DataFrame, inferred_s
                         "file_id": file_id,
                         "data": json.dumps(insert_data_rows),
                         "schema": json.dumps(inferred_schema),
-                        "description": json.dumps({k: "" for k in inferred_schema.keys()})
+                        "description": json.dumps(description_for_insert)
                     }
                 )
                 logger.info(f"Inserted {len(insert_data_rows)} rows into file_data for file_id {file_id}.")
@@ -398,7 +423,7 @@ def process_uploaded_report(
                 num_records = len(df)
 
             # 6. Insert parsed data into file_data and schema into file_schemas
-            insert_file_data(new_file_id, company_id, df, inferred_schema)
+            insert_file_data(new_file_id, company_id, df, inferred_schema, category_name)
 
 
             return {

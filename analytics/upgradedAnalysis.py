@@ -47,16 +47,16 @@ def get_db_connection():
 
     db_host = os.environ.get("DB_HOST", "35.190.189.103")
 
-    # conn_string = (
-    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-    #     f"?host={db_host}"
-    # )
-
-    # # Alternative format (both should work):
     conn_string = (
         f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-        f"?host=/cloudsql/{instance_connection_name}"
+        f"?host={db_host}"
     )
+
+    # # Alternative format (both should work):
+    # conn_string = (
+    #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+    #     f"?host=/cloudsql/{instance_connection_name}"
+    # )
 
     engine = None
     conn = None
@@ -148,7 +148,7 @@ def get_file_data_and_schema(file_id: str) -> Dict[str, Any]:
 
 
 # --- LLM Initialization (No changes) ---
-def initialize_gemini_model(model_name="gemini-1.5-flash", system_instruction=None):
+def initialize_gemini_model(model_name="gemini-2.0-flash", system_instruction=None):
     """Initializes and configures the Gemini model."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -367,6 +367,21 @@ def get_distinct_categories(company_id: int) -> List[str]:
     except Exception as e:
         logger.error(f"❌ Error fetching distinct categories: {e}", exc_info=True)
         raise
+def remove_newlines(text: str) -> str:
+    """
+    Removes all newline characters from the given text.
+
+    Parameters
+    ----------
+    text : str
+        The input text with potential newlines.
+
+    Returns
+    -------
+    str
+        The text with all `\n` characters removed.
+    """
+    return text.replace('\n', '').strip()
 
 
 def get_messages_from_db(chat_id: str) -> List[Dict[str, Any]]:
@@ -408,7 +423,7 @@ def format_chat_history_for_gemini(chat_messages: List[Dict[str, Any]]) -> List[
 
     return gemini_history
 
-def get_category_schemas(
+def get_category_schemas_and_description(
         company_id: int,
         selected_categories: List[str]
 ) -> Dict[str, Any]:
@@ -437,8 +452,8 @@ def get_category_schemas(
         )
         SELECT
             lfp.category_name,
-            lfp.file_id,
-            fd.schema
+            fd.schema,
+            fd.description
         FROM LatestFilesPerCategory lfp
         JOIN public.file_data fd ON lfp.file_id = fd.file_id
         WHERE lfp.rn = 1;
@@ -454,6 +469,116 @@ def get_category_schemas(
         logger.exception(f"Failed to retrieve category schemas: {str(e)}")
         return {}
 
+
+def generate_insight(data, task_description, insight_gemini=None):
+    logger.info("    Generating insight...")
+
+    if insight_gemini is None:
+        insight_instruction = f"""**Your Role and Goal:**
+                                    You are an expert data analyst. Your primary goal is to interpret raw data and transform it into a concise, easy-to-understand narrative for a business audience. You must go beyond the numbers to explain what they *mean*.
+                                    
+                                    **Your Task:**
+                                    Based on the provided JSON data and the 'Original Request' below, you will generate a single, self-contained HTML snippet that presents a clear and descriptive textual insight.
+                                    
+                                    **Critical Analysis Requirements:**
+                                    - **Analyze and Interpret:** Do not just list the data. Identify significant trends, patterns, outliers, and relationships within the data.
+                                    - **Explain the "Why":** Provide context and potential reasons for the trends you observe. Answer the question, "So what?" for the reader.
+                                    - **Synthesize Information:** Your output should be a cohesive narrative, not a list of disconnected facts. Tell a story with the data that directly answers the user's original request.
+                                    - **Be Factual:** Base your entire analysis ONLY on the data provided. Do not invent or assume information.
+                                    
+                                    **Strict Formatting Rules:**
+                                    - Your entire output must be a SINGLE self-contained HTML snippet.
+                                    - The root element must be a `<div>` with inline CSS styling.
+                                    - Use semantic tags for structure (e.g., `<h3>`, `<p>`, `<strong>`, `<ul>`, `<li>`).
+                                    - The insight should be brief and impactful.
+                                    - Absolutely no text, comments, or explanations should exist outside of the single root `<div>` tag.
+                                    - No Border Style. and do not center the main div horizentaly as it should be display left align.
+                                    - Do not add padding or Margin to main div.
+                                    - Font Family should typography and size should be 16. For heading size should be relevant.
+                                    - Explicitly mention margin 0 and padding 0 for main div and first text inside that div as there are previous by default margin and padding. it should be only for top component and first text compoent. but should have margin for better visisbility.
+                                    - For points use <ul>. The structure should be nice and looks goood.
+                                    ---
+                                    
+                                    ** Data is: {data}**
+                                    ** Description: {task_description}
+                                    """
+        try:
+            insight_gemini = initialize_gemini_model(
+                model_name="gemini-2.0-flash",
+                system_instruction=insight_instruction,
+            )
+            logger.debug("Insight Gemini model initialized.")
+        except Exception as model_init_error:
+            logger.error(
+                f"   [✗] Failed to initialize Insight Gemini model: {model_init_error}",
+                exc_info=True,
+            )
+            return None
+
+    insight_prompt = f"""
+    Data (JSON format):
+    {json.dumps(data, indent=2, default=str)}
+
+    Original Request for this Insight:
+    "{task_description}"
+
+    Generate the insight based *only* on the data provided:
+    """
+
+    try:
+        insight_chat = insight_gemini.start_chat()
+        insight_response = insight_chat.send_message(insight_prompt)
+        insight_text = clean_response_text(insight_response.text)
+        logger.debug(f"Generated Insight: {insight_text}")
+        logger.info("    [✓] Insight generated")
+        insight_text = remove_newlines(insight_text)
+        return insight_text
+
+    except Exception as insight_error:
+        logger.error(
+            f"   [✗] Failed to generate insight: {insight_error}",
+            exc_info=True,
+        )
+        return None
+
+
+def handle_chat_name_generation( chatId, prompt):
+    """
+    Handle all logic related to generating and updating chat names
+    Returns: bool indicating if name was updated
+    """
+    try:
+        conn = get_db_connection()
+        model = initialize_gemini_model()
+
+        # Check if chat exists and needs name generation
+        chat_query = """SELECT name FROM chats WHERE chat_id = :chat_id"""
+        chat_result = sql_query_with_params(chat_query, {"chat_id" : chatId})
+        logger.info(chat_result)
+        if not chat_result or chat_result[0]['name'] != "New Chat":
+            return False
+
+
+        # Prepare prompt for generating chat name
+        name_prompt = f"""Based on the User Prompt Request, generate a very concise 2-3 word title that captures the main topic. 
+        Keep it simple and descriptive. Only respond with the title, no additional text.
+
+        Current message: {prompt}
+        """
+
+        # Generate name using Gemini
+        response = model.generate_content(name_prompt)
+        chat_name = clean_response_text(response.text)
+        query = """UPDATE chats SET name = :name WHERE chat_id = :chat_id"""
+        params = {"chat_id": chatId, "name": chat_name}
+        with get_db_connection() as (conn, engine):
+            conn.execute(text(query), params)
+            conn.commit()
+        return True
+
+    except Exception as e:
+        logger.error(f"Error in handle_chat_name_generation: {str(e)}")
+        return False
 
 def process_prompt(
         prompt: str, company_id: int, chat_id: str,selected_categories: List[str]
@@ -497,11 +622,13 @@ def process_prompt(
         "result": json.dumps(response)
     })
 
+    handle_chat_name_generation(chat_id, prompt)
+
     results = []  # Collects the structured LLM responses to return
 
     try:
         logger.info(f"\n📜 STEP 2b: FETCHING SCHEMAS FOR SELECTED CATEGORIES")
-        category_schemas_map = get_category_schemas(company_id, selected_categories)
+        category_schemas_map = get_category_schemas_and_description(company_id, selected_categories)
 
         if not category_schemas_map:
             error_msg = f"No schemas retrieved for selected categories for company ID {company_id}."
@@ -535,9 +662,9 @@ def process_prompt(
                                     an array of JSON objects.
 
                                     The Description about columns of this 'data' column for the relevant company is described by the 
-                                    'Description'. It's jsonb format where top key have description about it's columns
+                                    'description'. It's jsonb format where top key have description about it's columns
 
-                                    Data Schema (Structure within the 'data' JSONB column of 'file_data'
+                                    Data Schema (Structure within the 'data' JSONB column of 'file_data') with description of columns
                                     {category_schemas_map}                         
                                     Use exact category names as given with schema as it store in database exact like this.
                                     **Guidelines for Defining Tasks:**
@@ -557,6 +684,7 @@ def process_prompt(
                                         * Consider if data from DIFFERENT KEYS within the JSONB 'data' column (e.g., 
                                         "pms" and "change_order") needs to 
                                         be conceptually combined or related to fulfill an objective.
+                                        If user only mention one task like generate insight and not mention other task like report or graph just consider one task.
 
                                     2.  **Task Type Assignment (`task_type`) and Refinement:**
                                         * For each objective identified in Step 1, assign a `task_type` as follows:
@@ -616,8 +744,7 @@ def process_prompt(
                                     Based ONLY on the user prompt, the schema, and these guidelines, list the task(s).
 
                                     For each task, specify:
-                                    1.  'task_type': 'insight', 'visualization', or 'report' (determined by Guideline 
-                                    2).
+                                    1.  'task_type': 'insight', 'visualization', or 'report' (determined by Guideline)
                                     2.  'description': Brief description of the task's objective (e.g., "Report of 
                                     change orders per project manager"). 
                                     This should reflect the objective identified in Guideline 1.
@@ -709,7 +836,7 @@ def process_prompt(
                                 * Each `file_data.data` column contains an array of JSON objects, representing rows from one uploaded file. Also file_data.file_id is foreign key from public.files.
                                 * **Relevant Schema:** You will be provided with the specific schema for the category you are querying from. This schema describes the fields within the JSON objects in the `data` array.
                                 * **Data in public.file_data against file_id is store as jsonb like ([("date": "2025-01-06T00:00:00", "pm_id": 209012, ...)]). it just store as array of objects.
-                                * **schema:** The schema of every file category is: {category_schemas_map}. Do not place company id directly.
+                                * **schema:** The schema of every file category and description of columns is: {category_schemas_map}. Do not place company id directly.
                                 * **company id (int)**: Use company id to filter files: {company_id}
                                 ### **Query Strategies & Parameters**
                                 if user do not mention any time window then write query to fetch data based on latest file. public.files table have uploaded_at column
@@ -788,7 +915,11 @@ def process_prompt(
                                                 GROUP BY (elem ->> 'id')::FLOAT::INTEGER
                                             )
                                     * Use final `SELECT` aliases in `GROUP BY` and `ORDER BY` clauses.
-                                
+                                    
+                                ### **Formatting:**
+                                    * If Column has value curreny or amount type then must add curreny sign. You MUST handle negative values correctly. The negative sign (-) must appear before the currency symbol. If you are able to detect from prompts or from columns description which currency is used in columns then used that else dollars.
+                                    * If Column is calculating profit percentage or value percentage value, then also add % sign with value.
+                                                                    
                                 ### **Query Structure Checklist**
                                 * Starts with `WITH`.
                                 * For `latest_file` strategy: uses `WHERE is_latest=true`
@@ -955,55 +1086,34 @@ def process_prompt(
 
                 # (Insight Generation Logic)
                 if task_type == "insight":
-                    logger.info(f"    Generating insight...")
-                    if insight_gemini is None:
-                        insight_instruction = """You are an analyst. Based on the provided data (in JSON format) and 
-                                                the original request, generate a concise textual insight.
-                                                - Focus on answering the specific question asked in the 'Original Request'.
-                                                - Be factual and base your answer ONLY on the provided data.
-                                                - Keep the insight brief (1-3 sentences).
-                                                - Output ONLY the insight text. No extra formatting or greetings."""
-                        try:
-                            insight_gemini = initialize_gemini_model(
-                                model_name="gemini-1.5-flash",
-                                system_instruction=insight_instruction,
-                            )
-                            logger.debug("Insight Gemini model initialized.")
-                        except Exception as model_init_error:
-                            logger.error(
-                                f"   [✗] Failed to initialize Insight Gemini model: {model_init_error}",
-                                exc_info=True,
-                            )
-                            response = {
-                                "type": "error",
-                                "data": f"Error processing task '{task_description}': Insight generation "
-                                        f"component failed to initialize.",
-                            }
-                            results.append(
-                                response
-                            )
-                            insert_message_into_db({
-                                "chat_id": chat_id,
-                                "sender": "System",
-                                "result": json.dumps(response)
-                            })
-                            continue
+                    logger.info("    Generating insight...")
 
-                    insight_prompt = f"""
-                                            Data (JSON format):
-                                            {json.dumps(data, indent=2, default=str)}
+                    try:
+                        # ── Call the shared helper ──────────────────────────────────────
+                        insight_text = generate_insight(
+                            data=data,
+                            task_description=task_description,
+                        )
+                        # Insight generation returns None if it handled an error internally.
+                        if insight_text is None:
+                            raise RuntimeError("generate_insight returned no output")
 
-                                            Original Request for this Insight:
-                                            "{task_description}"
+                        logger.debug("Generated Insight: %s", insight_text)
+                        logger.info("    [✓] Insight generated")
 
-                                            Generate the insight based *only* on the data provided:
-                                            """
-                    insight_chat = insight_gemini.start_chat()
-                    insight_response = insight_chat.send_message(insight_prompt)
-                    insight_text = clean_response_text(insight_response.text)
-                    logger.debug(f"Generated Insight: {insight_text}")
-                    logger.info(f"    [✓] Insight generated")
-                    response = {"type": "text", "data": insight_text}
+                        response = {"type": "text", "data": insight_text}
+
+                    except Exception as err:
+                        logger.error("   [✗] Insight generation failed: %s", err, exc_info=True)
+                        response = {
+                            "type": "error",
+                            "data": (
+                                f"Error processing task '{task_description}': "
+                                "Insight generation failed."
+                            ),
+                        }
+
+                    # ── Persist & return the response ──────────────────────────────────
                     results.append(response)
                     insert_message_into_db({
                         "chat_id": chat_id,
@@ -1034,6 +1144,22 @@ def process_prompt(
                             "result": json.dumps(response)
                         })
                         continue
+
+                    insight_text = None
+                    try:
+                        insight_text = generate_insight(
+                            data=data,
+                            task_description=task_description,
+                        )
+
+                        if insight_text is not None:
+                            print("Generated Insight:", insight_text)
+                        else:
+                            print("Insight generation failed. No output returned.")
+
+                    except Exception as e:
+                        logger.exception(f"Unexpected error while generating insight: {e}")
+                        raise
 
                     if plotly_gemini is None:
                         plotly_instruction = f""" You are a data visualization expert using Plotly.js. Given a 
@@ -1151,7 +1277,7 @@ def process_prompt(
                         # Optional: Deeper validation of trace structure if needed
 
                         logger.info(f"    [✓] Visualization ({viz_type}) generated")
-                        response = {"type": "graph", "data": plotly_json}
+                        response = {"type": "graph", "data": plotly_json,"insight": insight_text}
                         results.append(response)
                         insert_message_into_db({
                             "chat_id": chat_id,
@@ -1182,6 +1308,23 @@ def process_prompt(
 
                 # (Report Generation Logic)
                 elif task_type == "report":
+                    insight_text = None
+                    try:
+                        insight_text = generate_insight(
+                            data=data,
+                            task_description=task_description,
+                        )
+
+                        if insight_text is not None:
+                            print("Generated Insight:", insight_text)
+                        else:
+                            print("Insight generation failed. No output returned.")
+
+                    except Exception as e:
+                        logger.exception(f"Unexpected error while generating insight: {e}")
+                        raise
+                        # Optionally: re-raise or handle as needed
+
                     logger.info(f"    Generating Excel report...")
                     try:
                         if (
@@ -1360,6 +1503,7 @@ def process_prompt(
                                 "filename": filename,
                                 "content_base64": excel_base64,
                                 "mimetype": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                "insight": insight_text
                             }
                         }
                         results.append(
