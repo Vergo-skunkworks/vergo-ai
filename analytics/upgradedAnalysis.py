@@ -47,16 +47,16 @@ def get_db_connection():
 
     db_host = os.environ.get("DB_HOST", "35.190.189.103")
 
-    conn_string = (
-        f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-        f"?host={db_host}"
-    )
-
-    # # Alternative format (both should work):
     # conn_string = (
     #     f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
-    #     f"?host=/cloudsql/{instance_connection_name}"
+    #     f"?host={db_host}"
     # )
+
+    # # Alternative format (both should work):
+    conn_string = (
+        f"postgresql+psycopg2://{db_user}:{quote_plus(db_password)}@/{db_name}"
+        f"?host=/cloudsql/{instance_connection_name}"
+    )
 
     engine = None
     conn = None
@@ -464,7 +464,13 @@ def get_category_schemas_and_description(
     try:
         rows = sql_query_with_params(query, params={"company_id": company_id})
         logger.info(f"The schemas are: {rows}")
-        return {row["category_name"]: row["schema"] for row in rows}
+        return {
+            row["category_name"]: {
+                "schema": row["schema"],
+                "description": row["description"]
+            }
+            for row in rows
+        }
     except Exception as e:
         logger.exception(f"Failed to retrieve category schemas: {str(e)}")
         return {}
@@ -628,9 +634,9 @@ def process_prompt(
 
     try:
         logger.info(f"\n📜 STEP 2b: FETCHING SCHEMAS FOR SELECTED CATEGORIES")
-        category_schemas_map = get_category_schemas_and_description(company_id, selected_categories)
+        category_schemas_and_description_map = get_category_schemas_and_description(company_id, selected_categories)
 
-        if not category_schemas_map:
+        if not category_schemas_and_description_map:
             error_msg = f"No schemas retrieved for selected categories for company ID {company_id}."
             logger.warning(error_msg)
             llm_response_data = {"type": "text", "data": error_msg}
@@ -639,7 +645,7 @@ def process_prompt(
             insert_message_into_db({"result": json.dumps(response), "chat_id": chat_id, "sender": "System"})
             return results
 
-        logger.info(f"[✓] Retrieved schemas for {len(category_schemas_map)} categories.")
+        logger.info(f"[✓] Retrieved schemas for {len(category_schemas_and_description_map)} categories.")
 
         # --- Step 2b: Decompose Prompt into Tasks ---
         logger.info("\n🧠 STEP 2b: DECOMPOSING PROMPT INTO TASKS (using JSON schema)")
@@ -665,7 +671,7 @@ def process_prompt(
                                     'description'. It's jsonb format where top key have description about it's columns
 
                                     Data Schema (Structure within the 'data' JSONB column of 'file_data') with description of columns
-                                    {category_schemas_map}                         
+                                    {category_schemas_and_description_map}                         
                                     Use exact category names as given with schema as it store in database exact like this.
                                     **Guidelines for Defining Tasks:**
 
@@ -836,7 +842,7 @@ def process_prompt(
                                 * Each `file_data.data` column contains an array of JSON objects, representing rows from one uploaded file. Also file_data.file_id is foreign key from public.files.
                                 * **Relevant Schema:** You will be provided with the specific schema for the category you are querying from. This schema describes the fields within the JSON objects in the `data` array.
                                 * **Data in public.file_data against file_id is store as jsonb like ([("date": "2025-01-06T00:00:00", "pm_id": 209012, ...)]). it just store as array of objects.
-                                * **schema:** The schema of every file category and description of columns is: {category_schemas_map}. Do not place company id directly.
+                                * **schema:** The schema of every file category and description of columns is: {category_schemas_and_description_map}. Also provided you description of columns. Carefully analyze description of columns so that query generation can be better and right column can be selected for query.
                                 * **company id (int)**: Use company id to filter files: {company_id}
                                 ### **Query Strategies & Parameters**
                                 if user do not mention any time window then write query to fetch data based on latest file. public.files table have uploaded_at column
@@ -917,7 +923,8 @@ def process_prompt(
                                     * Use final `SELECT` aliases in `GROUP BY` and `ORDER BY` clauses.
                                     
                                 ### **Formatting:**
-                                    * If Column has value curreny or amount type then must add curreny sign. You MUST handle negative values correctly. The negative sign (-) must appear before the currency symbol. If you are able to detect from prompts or from columns description which currency is used in columns then used that else dollars.
+                                    * If Column has value currency or amount type then must add currency sign. You MUST handle negative values correctly. The negative sign (-) must appear before the currency symbol. If you are able to detect from prompts or from columns description which currency is used in columns then used that else dollars.
+                                    * Return the 'amount' value formatted with commas as thousand separators (e.g., 1,000,000) in the SQL query output.
                                     * If Column is calculating profit percentage or value percentage value, then also add % sign with value.
                                                                     
                                 ### **Query Structure Checklist**
