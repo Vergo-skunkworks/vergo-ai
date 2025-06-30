@@ -342,31 +342,6 @@ def insert_message_into_db(message_data: Dict[str, Any]) -> Dict[str, Any]:
         return dict(result._mapping) if result else None
 
 
-# --- Core Analysis Pipeline (Major Refactor for LLM-driven File/Category Inference) ---
-
-# --- NEW FUNCTION: get_distinct_categories ---
-def get_distinct_categories(company_id: int) -> List[str]:
-    """
-    Retrieves all distinct category names for a given company from the public.files table.
-    """
-    logger.debug(f"Retrieving distinct categories for company_id: {company_id}")
-    query = """
-        SELECT DISTINCT category_name
-        FROM public.files
-        WHERE company_id = :company_id AND category_name IS NOT NULL;
-    """
-    params = {"company_id": company_id}
-
-    categories = []
-    try:
-        with get_db_connection() as (conn, engine):
-            result = conn.execute(text(query), params).fetchall()
-            categories = [row[0] for row in result if row[0] is not None]
-            logger.info(f"Found {len(categories)} distinct categories for company {company_id}.")
-            return categories
-    except Exception as e:
-        logger.error(f"❌ Error fetching distinct categories: {e}", exc_info=True)
-        raise
 def remove_newlines(text: str) -> str:
     """
     Removes all newline characters from the given text.
@@ -406,7 +381,7 @@ def format_chat_history_for_gemini(chat_messages: List[Dict[str, Any]]) -> List[
     For Gemini API, 'parts' should be a list of Content objects (often just strings).
     """
     gemini_history = []
-
+    chat_messages = chat_messages[-6:]
     for msg in chat_messages:
         role = "user" if msg["sender"].lower() == "user" else "model"
 
@@ -463,7 +438,6 @@ def get_category_schemas_and_description(
 
     try:
         rows = sql_query_with_params(query, params={"company_id": company_id})
-        logger.info(f"The schemas are: {rows}")
         return {
             row["category_name"]: {
                 "schema": row["schema"],
@@ -654,10 +628,19 @@ def process_prompt(
 
         decomposition_instruction = f"""
                                     Analyze the user's request: "{prompt}"
+                                    
                                     Based on this request and the Data Schema provided below, identify the specific 
                                     data analysis or reporting tasks 
                                     required to fulfill the user's objectives.
-
+                                    **Instructions:**
+                                        User Current Prompt: {prompt}. User Previous conversation already provided you. But User last prompt and llm response was: {formated_message_history[-2:]}. Follow below instructions.
+                                        - Your primary focus should always be the latest prompt.
+                                        - Use prior messages only when the user’s current request depends on or refers to earlier context (e.g., "same as before", "add previous filters", "build on earlier report", "now add", etc.).
+                                        - if user ask "now add this ___" then append these changes in previous prompt. Previous should be maintained.
+                                        - If there is no clear dependency, ignore previous history and respond based only on the new prompt.
+                                        - If a dependency is implied, extract the relevant information from the past messages to inform your response.
+                                        - Do not repeat old information unless the user asks for it.
+                                        - Be precise, and avoid redundancy.
                                     The data for these tasks resides in a single table 'file_data' within a JSONB 
                                     column named 'data'. You MUST filter 
                                     by company_id = {company_id} from files table. files table and file_data table have common file_id key
@@ -836,7 +819,15 @@ def process_prompt(
         sql_instruction = f"""You are an expert PostgreSQL query writer specializing in JSONB data. Your task is to generate a single, syntactically correct PostgreSQL `SELECT` query based on the provided task, the relevant category's schema, and the specified analysis strategy.
 
                                 **Strictly adhere to all rules below.**
-
+                                **Instructions:**
+                                    User Current Prompt: {prompt}. User and LLM previous conversation already provided you. But User last prompt and llm response was: {formated_message_history[-2:]}. follow below instructions.
+                                    - Your primary focus should always be the latest prompt.
+                                    - Use prior messages only when the user’s current request depends on or refers to earlier context (e.g., "same as before", "add previous filters", "build on earlier report", "now add", etc.).
+                                    - if user ask "now add this ___" then append these changes in previous prompt. Previous should be maintained.
+                                    - If there is no clear dependency, ignore previous history and respond based only on the new prompt.
+                                    - If a dependency is implied, extract the relevant information from the past messages to inform your response.
+                                    - Do not repeat old information unless the user asks for it.
+                                    - Be precise, and avoid redundancy.
                                 ### **Data Sources Overview**
                                 * Data is stored in `public.file_data` (actual records as JSONB array) and `public.files` (metadata like `uploaded_at`, `category_name`, `file_id`).
                                 * Each `file_data.data` column contains an array of JSON objects, representing rows from one uploaded file. Also file_data.file_id is foreign key from public.files.
@@ -895,6 +886,7 @@ def process_prompt(
                                 ### **JSONB Querying Rules (apply to `elem` from unnested data)**
                                 * **Accessing Fields:** `elem ->> 'column_name'`
                                 * **Casting:** Apply casts BEFORE operations (`::INTEGER`, `::FLOAT`, `::DATE`, `::TIMESTAMP WITH TIME ZONE`). Use `NULLIF(elem ->> 'col_name', 'NULL')::TYPE`.
+                                * For integer values, first cast as FLOAT, apply ROUND, then cast to INTEGER: ROUND((elem ->> 'column')::FLOAT)::INTEGER.
                                 * **Division by Zero:** `NULLIF(denominator, 0)`.
                                 * **Aggregation:** Standard SQL aggregates (`SUM`, `AVG`, `COUNT`).
                                 * **NULL Handling:** `COALESCE(field, 0)` for numerics.
@@ -1074,7 +1066,7 @@ def process_prompt(
                     response = {
                         "type": "text",
                         "data": f"For '{task_description}': The query executed successfully but found no matching "
-                                f"data for Company ID {company_id} based on the criteria.",
+                                f"data based on the criteria.",
                     }
                     results.append(
                         response
@@ -1160,7 +1152,8 @@ def process_prompt(
                         )
 
                         if insight_text is not None:
-                            print("Generated Insight:", insight_text)
+                            # print("Generated Insight:", insight_text)
+                            pass
                         else:
                             print("Insight generation failed. No output returned.")
 
