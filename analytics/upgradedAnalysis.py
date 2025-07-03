@@ -411,7 +411,10 @@ def get_category_schemas_and_description(
     """
     if not selected_datasource:
         return {}
-    in_clause = tuple(selected_datasource)
+    if len(selected_datasource) == 1:
+        in_clause = f"= '{selected_datasource[0]}'"
+    else:
+        in_clause = f"IN {tuple(selected_datasource)}"
     # in_clause = ', '.join([f"'{cat}'" for cat in selected_datasource])
     print(in_clause)
 
@@ -422,7 +425,7 @@ def get_category_schemas_and_description(
                 f.original_file_name,
                 f.file_id
             FROM public.files f
-            WHERE f.company_id = :company_id AND f.file_id IN {in_clause}
+            WHERE f.company_id = :company_id AND f.file_id {in_clause}
         )
         SELECT
             original_file_name,
