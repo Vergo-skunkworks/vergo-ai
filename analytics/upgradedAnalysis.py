@@ -1022,6 +1022,7 @@ def process_prompt(
                                         * **Casting:** Apply casts BEFORE operations (`::INTEGER`, `::FLOAT`, `::DATE`, `::TIMESTAMP WITH TIME ZONE`). Use `NULLIF(elem ->> 'col_name', 'NULL')::TYPE`.
                                         * For integer values, first cast as FLOAT, apply ROUND, then cast to INTEGER: ROUND((elem ->> 'column')::FLOAT)::INTEGER.
                                         * **Division by Zero:** `NULLIF(denominator, 0)`.
+                                        * **Important**: If you are working on column which is amount or current, it may contain currency sign. if in description column currency is available the use it or else use default dollars to remove the dollar sign and convert to int or float. e.g: SUM(COALESCE(NULLIF(REPLACE(REPLACE(elem ->> 'amount', '$', ''), ',', ''), '')::FLOAT, 0)) AS total_amount
                                         * **Aggregation:** Standard SQL aggregates (`SUM`, `AVG`, `COUNT`).
                                         * **NULL Handling:** `COALESCE(field, 0)` for numerics.
                                         * **Total Row (If Requested):** Use `UNION ALL` with a `totals` CTE, result in `report_data` CTE.
