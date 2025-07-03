@@ -125,7 +125,8 @@ def query_pipeline():
     prompt = data.get("prompt")
     company_id = data.get("company_id")
     chat_id = data.get("chat_id")
-    selected_categories = data.get("selected_categories")
+    selected_datasource = data.get("selected_datasource")
+    selected_datasource_type = data.get("selected_datasource_type")
 
     if not prompt:
         logger.warning("Missing prompt in request")
@@ -141,7 +142,7 @@ def query_pipeline():
         # The process_prompt function in analytics.data_analysis_pipeline.py
         # will now need to query the new relational tables (files, file_data, file_schemas)
         # to get the data and schema context for the LLM.
-        result = process_prompt(prompt, company_id, chat_id, selected_categories)
+        result = process_prompt(prompt, company_id, chat_id, selected_datasource, selected_datasource_type)
         print(result) # Consider using logger.info instead of print for production
         logger.info("Successfully processed prompt via /api/query")
         return jsonify({"response": {
