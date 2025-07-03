@@ -447,7 +447,7 @@ def get_category_schemas_and_description(
                     ORDER BY f.uploaded_at DESC, f.file_id DESC
                 ) as rn
             FROM public.files f
-            WHERE f.company_id = :company_id AND f.category_name IN {in_clause}
+            WHERE f.company_id = :company_id AND f.category_name {in_clause}
         )
         SELECT
             lfp.category_name,
