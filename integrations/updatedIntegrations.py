@@ -4,6 +4,7 @@ import os
 import logging
 import re
 import json
+import dateparser
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import create_engine, text, inspect
 import datetime
@@ -170,49 +171,6 @@ def setup_db_tables():
 
 # Rename setup_jsonb_table to setup_db_tables as it's more comprehensive
 setup_jsonb_table = setup_db_tables
-
-
-# # New function to get file details for a company
-# def get_company_files_metadata(company_id: int) -> List[Dict[str, Any]]:
-#     """Retrieves metadata for all files associated with a company."""
-#     with get_db_connection() as (conn, engine):
-#         try:
-#             query = text("""
-#                 SELECT
-#                     f.file_id,
-#                     f.original_file_name,
-#                     f.logical_file_name,
-#                     f.file_type,
-#                     f.uploaded_at,
-#                     f.is_latest,
-#                     f.version,
-#                     fc.category_name
-#                 FROM
-#                     public.files f
-#                 LEFT JOIN
-#                     public.file_categories fc ON f.category_name = fc.category_name
-#                 WHERE
-#                     f.company_id = :company_id
-#                 ORDER BY
-#                     f.logical_file_name, f.version DESC
-#             """)
-#             result = conn.execute(query, {"company_id": company_id}).fetchall()
-#             files_metadata = []
-#             for row in result:
-#                 files_metadata.append({
-#                     "file_id": str(row[0]),
-#                     "original_file_name": row[1],
-#                     "logical_file_name": row[2],
-#                     "file_type": row[3],
-#                     "uploaded_at": row[4].isoformat() if row[4] else None,
-#                     "is_latest": row[5],
-#                     "version": row[6],
-#                     "category_name": row[7]
-#                 })
-#             return files_metadata
-#         except SQLAlchemyError as e:
-#             logger.error(f"❌ Error fetching files metadata for company_id {company_id}: {e}", exc_info=True)
-#             raise
 
 def get_file_schema_definition(file_id: str) -> Dict[str, Any]:
     """Retrieves the schema definition for a specific file."""
@@ -413,7 +371,24 @@ def process_uploaded_report(
 
             df = df.dropna(how="all") # Drop rows that are entirely NaN
             df = df.where(df.notna(), None) # Replace NaN values with None for JSON serialization
-
+            # STANDARD_DATE_FORMAT = "%Y-%m-%d"  # Change this if you want to include time too
+            #
+            # for col in df.columns:
+            #     try:
+            #         if df[col].dtype == 'object':
+            #             parsed_col = df[col].map(
+            #                 lambda x: dateparser.parse(str(x)) if pd.notnull(x) else None
+            #             )
+            #             valid_count = parsed_col.notna().sum()
+            #
+            #             if valid_count >= len(df) * 0.6:
+            #                 # Format all valid dates to YYYY-MM-DD, invalid ones stay None
+            #                 df[col] = parsed_col.map(
+            #                     lambda dt: dt.strftime(STANDARD_DATE_FORMAT) if pd.notnull(dt) else None
+            #                 )
+            #                 logger.info(f"Standardized date column '{col}' to format {STANDARD_DATE_FORMAT}.")
+            #     except Exception as e:
+            #         logger.warning(f"Could not parse or format column '{col}' as dates: {e}")
             if df.empty:
                 logger.warning(f"File '{file_storage.filename}' is empty after removing empty rows.")
                 num_records = 0

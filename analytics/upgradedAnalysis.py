@@ -428,11 +428,12 @@ def get_category_schemas_and_description(
             WHERE f.company_id = :company_id AND f.file_id {in_clause}
         )
         SELECT
-            original_file_name,
+            lfp.original_file_name,
             lfp.file_id,
             lfp.category_name,
             fd.schema,
-            fd.description
+            fd.description,
+            jsonb_path_query_array(fd.data, '$[0 to 1]') AS sample_row
         FROM LatestFilesPerCategory lfp
         JOIN public.file_data fd ON lfp.file_id = fd.file_id
     """
@@ -452,7 +453,9 @@ def get_category_schemas_and_description(
         SELECT
             lfp.category_name,
             fd.schema,
-            fd.description
+            fd.description,
+            -- This line extracts the first two elements from the 'data' array
+            jsonb_path_query_array(fd.data, '$[0 to 1]') AS sample_row
         FROM LatestFilesPerCategory lfp
         JOIN public.file_data fd ON lfp.file_id = fd.file_id
         WHERE lfp.rn = 1;
@@ -461,7 +464,7 @@ def get_category_schemas_and_description(
     logger.info(f"[✓] Running schema retrieval query for categories: {selected_datasource}")
 
     try:
-        if selected_datasource_type == "files":
+        if selected_datasource_type == "Files":
             query = query_forFiles
         else:
             query = query_forCategories
@@ -469,6 +472,7 @@ def get_category_schemas_and_description(
         if selected_datasource_type == "files":
             return {
                 row["file_id"]: {
+                    "sample_rows": row["sample_row"],
                     "file_name": row["original_file_name"],
                     "schema": row["schema"],
                     "description": row["description"]
@@ -478,6 +482,7 @@ def get_category_schemas_and_description(
         else:
             return {
                 row["category_name"]: {
+                    "sample_rows": row["sample_row"],
                     "schema": row["schema"],
                     "description": row["description"]
                 }
@@ -712,6 +717,7 @@ def process_prompt(
                                         "pms" and "change_order") needs to 
                                         be conceptually combined or related to fulfill an objective.
                                         If user only mention one task like generate insight and not mention other task like report or graph just consider one task.
+                                        ** Mandatory **: If user ask report with insight or , graph with insight, just consider one task. And type should be report or graph not insight. if user ask report with graph this is distinct tasks. if user do not mention explicitly charts and report both then should only be 1 task generated.
 
                                     2.  **Task Type Assignment (`task_type`) and Refinement:**
                                         * For each objective identified in Step 1, assign a `task_type` as follows:
@@ -872,6 +878,7 @@ def process_prompt(
                                         * **Relevant Schema:** You will be provided with the specific schema for the file with category you are querying from. This schema describes the fields within the JSON objects in the `data` array.
                                         * **Data in public.file_data against file_id is store as jsonb like ([("date": "2025-01-06T00:00:00", "pm_id": 209012, ...)]). it just store as array of objects.
                                         * **schema:** The schema of every file with category and description of columns is: {category_schemas_and_description_map}. Also provided you description of columns. Carefully analyze description of columns so that query generation can be better and right column can be selected for query.
+                                        * ** Important **: Also provided you sample rows of data. Carefully analyze sample rows of data so query generation can be better. if There is descrepencies in data we can adjust query like if data column have value like 1 july. we can adjust query. Also other things to be check
                                         * **company id (int)**: Use company id to filter files: {company_id}. This column is define in public.files. to get it join file_data with files table.
                                         ### **Query Strategies & Parameters**
                                         if user do not mention any time window then write query to fetch data.
@@ -894,6 +901,7 @@ def process_prompt(
                                         * **Casting:** Apply casts BEFORE operations (`::INTEGER`, `::FLOAT`, `::DATE`, `::TIMESTAMP WITH TIME ZONE`). Use `NULLIF(elem ->> 'col_name', 'NULL')::TYPE`.
                                         * For integer values, first cast as FLOAT, apply ROUND, then cast to INTEGER: ROUND((elem ->> 'column')::FLOAT)::INTEGER.
                                         * **Division by Zero:** `NULLIF(denominator, 0)`.
+                                        * ** Important**: If user do not specify which columns should be use, then do not fetch * columns. Use your intelligence which columns are relevant for user needs. Do not include irrelevant columns in query.
                                         * **Aggregation:** Standard SQL aggregates (`SUM`, `AVG`, `COUNT`).
                                         * **NULL Handling:** `COALESCE(field, 0)` for numerics.
                                         * **Important**: If you are working on column which is amount or current, it may contain currency sign. if in description column currency is available the use it or else use default dollars to remove the dollar sign and convert to int or float. e.g: SUM(COALESCE(NULLIF(REPLACE(REPLACE(elem ->> 'amount', '$', ''), ',', ''), '')::FLOAT, 0)) AS total_amount
@@ -968,6 +976,7 @@ def process_prompt(
                                         * **Relevant Schema:** You will be provided with the specific schema for the category you are querying from. This schema describes the fields within the JSON objects in the `data` array.
                                         * **Data in public.file_data against file_id is store as jsonb like ([("date": "2025-01-06T00:00:00", "pm_id": 209012, ...)]). it just store as array of objects.
                                         * **schema:** The schema of every file category and description of columns is: {category_schemas_and_description_map}. Also provided you description of columns. Carefully analyze description of columns so that query generation can be better and right column can be selected for query.
+                                        * ** Important **: Also provided you sample rows of data. Carefully analyze sample rows of data so query generation can be better. if There is descrepencies in data we can adjust query like if data column have value like 1 july. we can adjust query. Also other things to be check                                        
                                         * **company id (int)**: Use company id to filter files: {company_id}
                                         ### **Query Strategies & Parameters**
                                         if user do not mention any time window then write query to fetch data based on latest file. public.files table have uploaded_at column
@@ -1081,7 +1090,7 @@ def process_prompt(
                                         ---"""
 
         sql_instruction = None
-        if selected_datasource_type == "files":
+        if selected_datasource_type == "Files":
             logger.info(f"selected datasource type is files")
             sql_instruction = sql_instruction_for_files
         else:
@@ -1099,6 +1108,8 @@ def process_prompt(
             results.append(llm_response_data)
             insert_message_into_db({"result": llm_response_data, "chat_id": chat_id, "sender": "System"})
             return results
+
+        retry = 1
 
             # --- Loop Through Tasks ---
         for i, task in enumerate(tasks):
@@ -1264,17 +1275,17 @@ def process_prompt(
 
                 # (Visualization Generation Logic)
                 elif task_type == "visualization":
-                    viz_type_str = viz_type if viz_type else "chart"
+                    viz_type_str = viz_type if viz_type else "bar"
                     logger.info(f"    Generating {viz_type_str} visualization...")
 
-                    if not viz_type or viz_type not in ["bar", "line"]:
+                    if not viz_type_str or viz_type_str not in ["bar", "line"]:
                         logger.warning(
-                            f"    [!] Invalid or missing visualization type '{viz_type}' specified for task."
+                            f"    [!] Invalid or missing visualization type '{viz_type_str}' specified for task."
                         )
                         response = {
                             "type": "error",
                             "data": f"Skipping visualization for '{task_description}': Invalid or missing chart"
-                                    f" type ('{viz_type}'). Requires 'bar' or 'line'.",
+                                    f" type ('{viz_type_str}'). Requires 'bar' or 'line'.",
                         }
                         results.append(
                             response
